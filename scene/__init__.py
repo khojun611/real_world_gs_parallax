@@ -43,12 +43,16 @@ class Scene:
 
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
+            # --- 아래 [STEP 3] print 블록 추가 ---
+            # print(f"\n[STEP 3] Right after receiving scene_info in Scene.__init__:")
+            if scene_info.train_cameras:
+                print(f"  - First train_camera '{scene_info.train_cameras[0].image_name}': has_material={scene_info.train_cameras[0].has_pseudo_material}")
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
         else:
             assert False, "Could not recognize scene type!"
-
+        
         if not self.loaded_iter:
             with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
                 dest_file.write(src_file.read())
@@ -64,8 +68,23 @@ class Scene:
                 json.dump(json_cams, file)
 
         if shuffle:
-            random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
-            random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
+            # 셔플할 리스트의 복사본을 만듭니다.
+            train_cams_copy = list(scene_info.train_cameras)
+            random.shuffle(train_cams_copy)
+            
+            # _replace()를 사용해 train_cameras가 교체된 새로운 scene_info 객체를 생성합니다.
+            scene_info = scene_info._replace(train_cameras=train_cams_copy)
+            
+            # --- 아래 [STEP 4] print 블록 추가 (셔플 로직 바로 다음) ---
+            # print(f"\n[STEP 4] After shuffling in Scene.__init__:")
+            if scene_info.train_cameras:
+                # <<-- has_pseudo_diffuse를 has_pseudo_material로 변경 -->>
+                print(f"  - First train_camera '{scene_info.train_cameras[0].image_name}': has_material={scene_info.train_cameras[0].has_pseudo_material}")
+
+            if scene_info.test_cameras:
+                test_cams_copy = list(scene_info.test_cameras)
+                random.shuffle(test_cams_copy)
+                scene_info = scene_info._replace(test_cameras=test_cams_copy)
 
         self.cameras_extent = scene_info.nerf_normalization["radius"]
 

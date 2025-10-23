@@ -15,52 +15,38 @@ import numpy as np
 from utils.graphics_utils import getWorld2View2, getProjectionMatrix, getProjectionMatrixCorrect
 
 class Camera(nn.Module):
+    # --- << __init__ 함수의 인자 리스트를 수정합니다 >> ---
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
-                 image_name, uid,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, 
-                 data_device = "cuda", HWK = None, gt_refl_mask = None
-                 ):
-        super(Camera, self).__init__()
-
+             image_name, uid, image_height, image_width,
+             trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", 
+             HWK=None, normal_map=None, has_normal=False, gt_refl_mask=None,
+             pseudo_material_map=None, has_pseudo_material=False
+             ):
         self.uid = uid
-        self.colmap_id = colmap_id
-        self.R = R
-        self.T = T
+        self.data_device = data_device
+        # ... (기존 self 변수 할당은 그대로) ...
+        self.original_image = image
+        self.gt_alpha_mask = gt_alpha_mask
+        self.image_height = image_height
+        self.image_width = image_width
+        self.image_name = image_name
         self.FoVx = FoVx
         self.FoVy = FoVy
-        self.image_name = image_name
-        self.refl_mask = gt_refl_mask
-
-        try:
-            self.data_device = torch.device(data_device)
-        except Exception as e:
-            print(e)
-            print(f"[Warning] Custom device {data_device} failed, fallback to default cuda device" )
-            self.data_device = torch.device("cuda")
-
-        if HWK is not None: # #
-            self.image_width = int(HWK[1])
-            self.image_height = int(HWK[0])
-
-        if image is not None:
-            self.original_image = image.clamp(0.0, 1.0).to(self.data_device)
-            self.image_width = self.original_image.shape[2]
-            self.image_height = self.original_image.shape[1]
-
-            if gt_alpha_mask is not None:
-                # self.original_image *= gt_alpha_mask.to(self.data_device)
-                self.gt_alpha_mask = gt_alpha_mask.to(self.data_device)
-            else:
-                self.original_image *= torch.ones((1, self.image_height, self.image_width), device=self.data_device)
-                self.gt_alpha_mask = None
+        
+        self.normal_map = torch.from_numpy(normal_map).float().to(data_device) if has_normal else None
+        self.has_normal = has_normal
+        self.gt_refl_mask = gt_refl_mask.to(data_device) if gt_refl_mask is not None else None
+        
+        # --- << 새로운 self 변수를 할당합니다 >> ---
+        self.pseudo_material_map = torch.from_numpy(pseudo_material_map).float().to(data_device) if has_pseudo_material else None
+        self.has_pseudo_material = has_pseudo_material
         
         self.zfar = 100.0
         self.znear = 0.01
 
         self.trans = trans
         self.scale = scale
-        # NOTE: if camera has significant center offset (cx,cy!=W/2,H/2), MUST USE getProjectionMatrixCorrect !!
-        #HWK = None
+
         self.world_view_transform = torch.tensor(getWorld2View2(R, T, trans, scale)).transpose(0, 1).cuda()
         if HWK is None:
             self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
@@ -69,9 +55,10 @@ class Camera(nn.Module):
             self.projection_matrix = getProjectionMatrixCorrect(self.znear, self.zfar, HWK[0], HWK[1], HWK[2]).transpose(0,1).cuda()
         self.full_proj_transform = (self.world_view_transform.unsqueeze(0).bmm(self.projection_matrix.unsqueeze(0))).squeeze(0)
         self.camera_center = self.world_view_transform.inverse()[3, :3]
-        self.R = torch.tensor(self.R, dtype=torch.float32, device='cuda')
-        self.T = torch.tensor(self.T, dtype=torch.float32, device='cuda')
-
+        # --- 아래 두 줄이 누락되었습니다. 추가해주세요. ---
+        self.R = torch.tensor(R, dtype=torch.float32, device=self.data_device)
+        self.T = torch.tensor(T, dtype=torch.float32, device=self.data_device)
+        
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):
         self.image_width = width

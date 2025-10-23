@@ -108,29 +108,77 @@ class OptimizationParams(ParamGroup):
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
-        self.lambda_hybrid = 0.2 # <<-- 하이브리드 손실 가중치 추가
         
-
-
         self.ori_color_lr = 0.0075 
         self.refl_strength_lr =  0.005 
         self.roughness_lr =  0.005 
         self.metalness_lr = 0.01
         self.uncertainty_lr = 0.001
         self.normal_lr = 0.006
-
         self.envmap_cubemap_lr = 0.01
+        self.contrastive_lr = 0.001 # 프로젝션 헤드를 위한 학습률
         
         # Densification Settings
         self.percent_dense = 0.01
 
         # Regularization Parameters
         self.lambda_dssim = 0.2
+        self.lambda_hybrid = 0.0
+        self.lambda_hint = 0.0
+        self.lambda_purity = 0.0 # 순도 loss
+        #self.lambda_contrastive = 0.0  # 대조 학습 손실 가중치 (실험 시 0.1 등으로 시작)
+        # <<<--- 아래 두 줄을 추가하세요. ---<<<
+        #self.contrastive_num_patches = 128      # 대조 학습에 사용할 전체 패치 수
+        #self.contrastive_highlight_thresh = 0.2 # 하이라이트 마스크 임계값
+        #self.contrastive_patch_size = 16    # 대조 학습에 사용할 패치 크기
+        # <<<--- 이 줄을 추가하거나, 기존 줄이 올바른지 확인하세요. ---<<<
+        #self.contrastive_temp = 0.07        # 온도(temperature) 파라미터
+        self.use_high_freq_purity_loss = True # 고주파 가중치 사용 여부
+        self.purity_focal_gamma = 2.0 # Focal Loss를 위한 gamma
+        self.fourier_cutoff_ratio = 0.3 # 푸리에 마스크의 컷오프 비율
+        self.lambda_pseudo_normal = 0.0 # pseudo normal loss
+        self.lambda_pseudo_diffuse = 0.0 # diffuse 0 (비활성화)
+        self.lambda_pseudo_specular = 0.0 # specular 0 (비활성화)
+        self.lambda_normal_hybrid = 0.0
+        self.lambda_diffuse_cons = 0.0 # diffuse constraint
+        self.lambda_specular_neutral = 0.0 # specular_neural
+        # --- Specular Presence Hinge Loss 파라미터 추가 ---
+        self.lambda_spec_presence = 0.0      # 손실 가중치 (실험 시 1.0 ~ 10.0 등으로 시작)
+        self.spec_presence_from_iter = 3000  # 이 손실을 시작할 반복 시점
+        self.spec_presence_decay_start_iter = 25000 # 가중치 감쇠 시작 시점
+        self.spec_presence_decay_end_iter = 45000   # 가중치가 0이 되는 시점
+        self.spec_presence_tau = 0.0         # 하이라이트로 간주할 밝기 임계값 (0~1)
+        self.spec_presence_alpha = 0.0       # Specular가 최소한 가져야 할 밝기 비율 (0~1)
+        
+        # --- Metallic 맵 기반 손실을 위한 하이퍼파라미터 ---
+        self.lambda_metallic_supervision = 0.1
+        self.lambda_diffuse_metal = 0.0
+        self.lambda_specular_luminance = 0.0
+        self.lambda_unc_spec_consistency = 0.0  # Uncertainty-Specular 일관성 손실 가중치
+        self.unc_spec_from_iter = 6500          # 이 손실을 적용 시작할 시점
+        self.uncertainty_amp_gain = 20.0  # 증폭 계수(k). 클수록 대비가 강해짐.
+        self.uncertainty_amp_bias = 0.0  # 기준점(b). uncertainty의 평균적인 값 근처로 설정.
+        self.uncertainty_metallic_threshold = 0.0
+        self.metallic_threshold = 0.9
+        self.metallic_loss_from_iter = 3000
+        self.lambda_roughness_metal = 0.0      # <<-- 금속 영역의 roughness 손실 가중치
+        self.lambda_roughness_non_metal = 0.0  # <<-- 비금속 영역의 roughness 손실 가중치
+        # ----------------------------------------------------
+        # --- 여기까지 추가 ---
+        # <<<--- 여기에 아래 파라미터들을 추가하세요. ---<<<
+        self.lambda_energy = 0.0         # 에너지 보존 손실 가중치
+        self.energy_loss_from_iter = 5000  # 이 손실을 적용 시작할 시점
+        # <<<--- 여기에 아래 파라미터들을 추가하세요. ---<<<
+        self.lambda_diffuse_suppress = 0.0  # Diffuse 억제 손실 가중치
+        self.suppress_from_iter = 10000     # 이 손실을 적용 시작할 시점
+        self.suppress_refl_thresh = 0.5     # 반사로 간주할 refl_strength 임계값
+        self.suppress_unc_thresh = 0.3      # 반사로 간주할 uncertainty 임계값
+        
+        self.lambda_sparsity = 0.01
         self.lambda_dist = 0.0
         self.lambda_normal_render_depth = 0.05
         self.lambda_normal_smooth = 0.0
         self.lambda_depth_smooth = 0.0
-
 
         # initial values
         self.init_roughness_value = 0.1
@@ -141,28 +189,31 @@ class OptimizationParams(ParamGroup):
         self.refl_msk_thr_vol = 0.02
 
         self.enlarge_scale = 1.5
-
-
+        self.train_on_all = True
         # Opacity and Densify Settings
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
         self.densify_until_iter = 25000 
 
-        # # Extra settings
+        # Extra settings
         self.densify_grad_threshold = 0.0002
         self.prune_opacity_threshold = 0.05
-
-
 
         # Stage Settings
         self.initial = 0
         self.init_until_iter = 0 
-        self.volume_render_until_iter = 18000 
+        self.volume_render_until_iter = 0 
         self.normal_smooth_from_iter = 0
-        self.normal_smooth_until_iter = 18000
-        self.uncertainty_from_iter = -1 # <<-- 불확실성 학습 시작 시점 추가 (-1은 비활성화)
-                
+        self.normal_smooth_until_iter = 25000
+        self.uncertainty_from_iter = 3000
+        self.purity_loss_from_iter = 3000
+        self.diffuse_cons_from_iter = 5000
+        self.specular_neutral_from_iter = 500000
+        self.sparsity_loss_from_iter = 500000
+        self.pseudo_normal_from_iter = 3000
+        self.contrastive_from_iter = 300000   # <<<--- 이 줄을 추가하세요.
+        
         self.indirect = 0
         self.indirect_from_iter =  20000 
 
@@ -172,8 +223,6 @@ class OptimizationParams(ParamGroup):
         self.normal_prop_interval = 1000
         self.opac_lr0_interval = 200
         self.densification_interval_when_prop = 500
-
-
 
         self.normal_loss_start = 0
         self.dist_loss_start = 3000
@@ -192,7 +241,6 @@ class OptimizationParams(ParamGroup):
         self.sdf_trunc = -1.0
         self.mesh_res = 512
         self.num_cluster = 1
-
 
         super().__init__(parser, "Optimization Parameters")
 

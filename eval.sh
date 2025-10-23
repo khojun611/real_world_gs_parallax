@@ -1,20 +1,20 @@
-python -u eval.py --model_path ./output/ball/ball-0725_0952 #--save_images
-python -u eval.py --model_path ./output/car/car-0725_1038 #--save_images
-python -u eval.py --model_path ./coffee/coffee-0725_0910 #--save_images
-python -u eval.py --model_path ./output/helmet/helmet-0728_0741 #--save_images
-python -u eval.py --model_path ./output/teapot/teapot-0725_1125 #--save_images
+#python -u eval.py --model_path ./output/ball/ball-0725_0952 #--save_images
+#python -u eval.py --model_path ./output/car/car-0725_1038 #--save_images
+#python -u eval.py --model_path ./coffee/coffee-0725_0910 #--save_images
+#python -u eval.py --model_path ./output/helmet/helmet-0728_0741 #--save_images
+#python -u eval.py --model_path ./output/teapot/teapot-0725_1125 #--save_images
 # python -u eval.py --model_path output/toaster #--save_images
 
-python -u eval.py --model_path ./output/angel_blender/angel_blender-0728_1016 #--save_images
-python -u eval.py --model_path ./output/bell_blender/bell_blender-0728_1402 #--save_images
-python -u eval.py --model_path ./output/cat_blender/cat_blender-0728_1531 #--save_images
-python -u eval.py --model_path ./output/horse_blender/horse_blender-0728_1143 #--save_images
-python -u eval.py --model_path ./output/luyu_blender/luyu_blender-0728_1231 #--save_images
+#python -u eval.py --model_path ./output/angel_blender/angel_blender-0728_1016 #--save_images
+#python -u eval.py --model_path ./output/bell_blender/bell_blender-0728_1402 #--save_images
+#python -u eval.py --model_path ./output/cat_blender/cat_blender-0728_1531 #--save_images
+##python -u eval.py --model_path ./output/horse_blender/horse_blender-0728_1143 #--save_images
+#python -u eval.py --model_path ./output/luyu_blender/luyu_blender-0728_1231 #--save_images
 
 
-python -u eval.py --model_path ./output/potion_blender/potion_blender-0728_1059 #--save_images
-python -u eval.py --model_path ./output/tbell_blender/tbell_blender-0728_1445 #--save_images
-python -u eval.py --model_path ./output/teapot_blender/teapot_blender-0728_1317 #--save_images
+#python -u eval.py --model_path ./output/potion_blender/potion_blender-0728_1059 #--save_images
+#python -u eval.py --model_path ./output/tbell_blender/tbell_blender-0728_1445 #--save_images
+#python -u eval.py --model_path ./output/teapot_blender/teapot_blender-0728_1317 #--save_images
 
 
 # python -u eval.py --model_path ./output/chrome5/chrome5-0701_1516 --save_images
@@ -37,4 +37,12 @@ python -u eval.py --model_path ./output/teapot_blender/teapot_blender-0728_1317 
 #python -u eval.py --model_path  ./output/sedan/sedan-0711_0646 --save_images
 #python -u eval.py --model_path  ./output/mouse/mouse-0716_0553 --save_images
 #python -u eval.py --model_path  ./output/toycar/toycar-0711_0552 --save_images
-python -u eval.py --model_path  ./output/white_car/white_car-0723_0208 --save_images
+python -u visual_spec.py --model_path  ./output/car_gear/car_gear-0731_1834 --save_images
+python -u visual_spec.py --model_path  ./output/car_segmented/car_segmented-0731_1952 --save_images
+python -u visual_spec.py --model_path  ./output/chrome5/chrome5-0731_1606 --save_images
+python -u visual_spec.py --model_path  ./output/disk/disk-0731_1326 --save_images
+python -u visual_spec.py --model_path  .output/gardenspheres/gardenspheres-0731_0848 --save_images
+python -u visual_spec.py --model_path  ./output/postcase1/postcase1-0731_1447 --save_images
+python -u visual_spec.py --model_path  ./output/sedan/sedan-0731_0757 --save_images
+python -u visual_spec.py --model_path  ./output/tv2/tv2-0731_1218 --save_images
+python -u visual_spec.py --model_path  output/white_car/white_car-0731_1042 --save_images

@@ -306,7 +306,7 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
         sh2indirect = eval_sh(3, shs_indirect, reflection)
         indirect = torch.clamp_min(sh2indirect, 0.0)
     
-
+    
     contrib, rendered_image, rendered_features, radii, allmap = rasterizer(
         means3D = means3D,
         means2D = means2D,
@@ -320,13 +320,36 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     )
 
 
+    # gaussian_renderer.py -> render_surfel 함수 내부
     base_color = rendered_image
     refl_strength = rendered_features[:1]
     roughness = rendered_features[1:2]
     albedo = rendered_features[2:5]
     indirect_light = rendered_features[5:8]
-    rgb_uncertainty_map = rendered_features[8:9]
+    # 방금 추가한 uncertainty 채널을 여기서 분리합니다.
+    rendered_uncertainty = rendered_features[8:9]
+    
+    """
+    # --- ▼▼▼ 여기에 디버깅 코드를 추가하세요 ▼▼▼ ---
+    print(f"\n--- [DEBUG] In render_surfel for view: {viewpoint_camera.image_name} ---")
+    
+    # 1. 원본 Uncertainty 파라미터 상태 확인 (래스터라이저 입력 전)
+    #    이 값이 초기값(예: 1e-4)으로만 나온다면, load_ply에 문제가 있는 것입니다.
+    source_uncertainty = pc.get_uncertainty
+    if source_uncertainty.numel() > 0:
+        print(f"[Source]   pc.get_uncertainty stats >> Shape: {source_uncertainty.shape}, Min: {source_uncertainty.min().item():.6f}, Max: {source_uncertainty.max().item():.6f}, Mean: {source_uncertainty.mean().item():.6f}")
+    else:
+        print("[Source]   pc.get_uncertainty is EMPTY!")
 
+    # 2. 렌더링된 Uncertainty 맵 상태 확인 (래스터라이저 출력 후)
+    #    Source는 정상인데 이 값이 이상하다면, 래스터라이저 전달/해석 과정의 문제입니다.
+    if rendered_uncertainty.numel() > 0:
+        print(f"[Rendered] rendered_uncertainty stats >> Shape: {rendered_uncertainty.shape}, Min: {rendered_uncertainty.min().item():.6f}, Max: {rendered_uncertainty.max().item():.6f}, Mean: {rendered_uncertainty.mean().item():.6f}")
+    else:
+        print("[Rendered] rendered_uncertainty is EMPTY!")
+        
+    print("--------------------------------------------------------------------")
+    """
 
     # 2DGS normal and regularizations
     regularizations = compute_2dgs_normal_and_regularizations(allmap, viewpoint_camera, pipe)
@@ -370,7 +393,7 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
             "specular_map": specular,
             "base_color_map": albedo,
             "roughness_map": roughness,
-            "rgb_uncertainty_map": rgb_uncertainty_map, # <<-- 4. 최종 결과에 불확실성 맵 추가
+            "rgb_uncertainty_map": rendered_uncertainty, # <<-- 4. 최종 결과에 불확실성 맵 추가
             "viewspace_points": means2D,
             "visibility_filter" : radii > 0,
             "radii": radii,
@@ -475,7 +498,7 @@ def render_volume(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
 
     normals = pc.get_normal(scaling_modifier, dir_pp_normalized, return_delta=NORMAL_RES)
     delta_normal_norm = None
-    uncertainty = pc.get_uncertainty
+    
     # indirect light
     if pipe.use_asg:
         dir_pp = (pc.get_xyz - viewpoint_camera.camera_center)
@@ -555,8 +578,30 @@ def render_volume(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
         render_indirect = rendered_features[12:15] 
         render_direct = rendered_features[15:18]
         render_rgb_uncertainty_map = rendered_features[18:19]
+        
     else:
         render_rgb_uncertainty_map = rendered_features[11:12]
+    
+    """
+    # --- ▼▼▼ 여기에 디버깅 코드를 추가하세요 ▼▼▼ ---
+    print(f"\n--- [DEBUG] In render_volume for view: {viewpoint_camera.image_name} ---")
+    
+    # 1. 원본 Uncertainty 파라미터 상태 확인
+    source_uncertainty = pc.get_uncertainty
+    if source_uncertainty.numel() > 0:
+        print(f"[Source]   pc.get_uncertainty stats >> Shape: {source_uncertainty.shape}, Min: {source_uncertainty.min().item():.6f}, Max: {source_uncertainty.max().item():.6f}, Mean: {source_uncertainty.mean().item():.6f}")
+    else:
+        print("[Source]   pc.get_uncertainty is EMPTY!")
+
+    # 2. 렌더링된 Uncertainty 맵 상태 확인
+    if 'render_rgb_uncertainty_map' in locals() and render_rgb_uncertainty_map.numel() > 0:
+        print(f"[Rendered] rendered_uncertainty stats >> Shape: {render_rgb_uncertainty_map.shape}, Min: {render_rgb_uncertainty_map.min().item():.6f}, Max: {render_rgb_uncertainty_map.max().item():.6f}, Mean: {render_rgb_uncertainty_map.mean().item():.6f}")
+    else:
+        print("[Rendered] rendered_uncertainty is EMPTY or not defined!")
+        
+    print("--------------------------------------------------------------------")
+    # --- ▲▲▲ 여기까지 추가 ▲▲▲ ---
+    """
 
 
 

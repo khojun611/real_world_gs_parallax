@@ -25,16 +25,21 @@ from scene.gaussian_model import BasicPointCloud
 
 class CameraInfo(NamedTuple):
     uid: int
-    R: np.array
-    T: np.array
-    K: np.array
-    FovY: np.array
-    FovX: np.array
-    image: np.array
+    R: any
+    T: any
+    K: any
+    FovY: any
+    FovX: any
+    image: any
+    normal_map: any 
+    has_normal: bool
     image_path: str
     image_name: str
     width: int
     height: int
+    # --- Diffuse/Specular를 Material로 통합 ---
+    pseudo_material_map: any
+    has_pseudo_material: bool
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -66,11 +71,15 @@ def getNerfppNorm(cam_info):
 
     return {"translate": translate, "radius": radius}
 
+# scene/dataset_readers.py 파일
+
+# scene/dataset_readers.py 파일
+
 def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
     cam_infos = []
     for idx, key in enumerate(cam_extrinsics):
+        
         sys.stdout.write('\r')
-        # the exact output you're looking for:
         sys.stdout.write("Reading camera {}/{}".format(idx+1, len(cam_extrinsics)))
         sys.stdout.flush()
 
@@ -87,47 +96,68 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             focal_length_x = intr.params[0]
             FovY = focal2fov(focal_length_x, height)
             FovX = focal2fov(focal_length_x, width)
-            K = np.array([
-                [focal_length_x, 0, intr.params[1]],
-                [0, focal_length_x, intr.params[2]],
-                [0, 0, 1],
-            ])
+            K = np.array([[focal_length_x, 0, intr.params[1]], [0, focal_length_x, intr.params[2]], [0, 0, 1]])
         elif intr.model=="PINHOLE":
             focal_length_x = intr.params[0]
             focal_length_y = intr.params[1]
             FovY = focal2fov(focal_length_y, height)
             FovX = focal2fov(focal_length_x, width)
-            K = np.array([
-                [focal_length_x, 0, intr.params[2]],
-                [0, focal_length_y, intr.params[3]],
-                [0, 0, 1],
-            ])
-        elif intr.model=="SIMPLE_RADIAL":
-            focal_length_x = intr.params[0]
-            FovY = focal2fov(focal_length_x, height)
-            FovX = focal2fov(focal_length_x, width)
-            K = np.array([
-                [focal_length_x, 0, intr.params[1]],
-                [0, focal_length_x, intr.params[2]],
-                [0, 0, 1],
-            ])
+            K = np.array([[focal_length_x, 0, intr.params[2]], [0, focal_length_y, intr.params[3]], [0, 0, 1]])
         else:
             assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
 
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_name = os.path.basename(image_path).split(".")[0]
-        image = Image.open(image_path.replace('.JPG', '.jpg'))
+        image = Image.open(image_path)
+        
+        normal_map = None
+        has_normal = False
+        try:
+            normal_map_path = os.path.join(os.path.dirname(os.path.dirname(image_path)), "normals", image_name + '_normals.npy')
+            if os.path.exists(normal_map_path):
+                normal_map = np.load(normal_map_path)
+                if normal_map.shape[0] == 3:
+                    normal_map = normal_map.transpose(1, 2, 0)
+                if normal_map.shape[1] != image.size[0] or normal_map.shape[0] != image.size[1]:
+                    target_height, target_width = image.size[1], image.size[0]
+                    normal_map = cv2.resize(normal_map, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+                norm = np.linalg.norm(normal_map, axis=2, keepdims=True)
+                normal_map = normal_map / (norm + 1e-8)
+                has_normal = True
+        except Exception as e:
+            print(f"\n[Warning] Could not process normal map for '{image_name}': {e}")
+            pass
 
-        #if intr.model=="SIMPLE_RADIAL":
-        #    image = cv2.undistort(np.array(image), K, np.array([intr.params[3], 0,0,0]))
-        #    image = Image.fromarray(image.astype('uint8')).convert('RGB')
+        # --- << 기존 Material 로딩 로직을 아래 코드로 대체 >> ---
+        pseudo_material_map = None
+        has_pseudo_material = False
+        try:
+            # 1. 폴더 경로를 'material'로 수정합니다.
+            #    os.path.dirname(images_folder)는 'images' 폴더의 상위 디렉토리입니다.
+            material_folder_path = os.path.join(os.path.dirname(images_folder), "material")
+            
+            # 2. 파일 이름을 '[image_name]_material.npy' 형식으로 동적으로 생성합니다.
+            material_file_path = os.path.join(material_folder_path, image_name + '_material.npy')
+            
+            if os.path.exists(material_file_path):
+                pseudo_material_map = np.load(material_file_path)
+                has_pseudo_material = True
+        except Exception as e:
+            print(f"\n[Warning] Could not process material map for {image_name}: {e}")
+            pass
+        # --------------------------------------------------------------------------
 
         real_im_scale = image.size[0] / width
-        K[:2] *=  real_im_scale
+        K[:2] *= real_im_scale
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, K=K, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height)
+                              normal_map=normal_map, has_normal=has_normal,
+                              image_path=image_path, image_name=image_name, width=width, height=height,
+                              # --- CameraInfo에 새로운 변수 전달 ---
+                              pseudo_material_map=pseudo_material_map,
+                              has_pseudo_material=has_pseudo_material)
         cam_infos.append(cam_info)
+        
     sys.stdout.write('\n')
     return cam_infos
 
@@ -185,6 +215,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
         train_cam_infos = cam_infos
         test_cam_infos = []
 
+    
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
     ply_path = os.path.join(path, "sparse/0/points3D.ply")
@@ -210,6 +241,13 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
                            test_cameras=test_cam_infos,
                            nerf_normalization=nerf_normalization,
                            ply_path=ply_path)
+    
+    # --- 아래 [STEP 2] print 블록 추가 ---
+    # print(f"\n[STEP 2] Before returning from readColmapSceneInfo:")
+    if scene_info.train_cameras:
+        # <<-- has_pseudo_diffuse를 has_pseudo_material로 변경 -->>
+        print(f"  - First train_camera '{scene_info.train_cameras[0].image_name}': has_material={scene_info.train_cameras[0].has_pseudo_material}")
+
     return scene_info
 
 def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png"):
@@ -261,7 +299,10 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
 
             # For blender datasets, we consider its camera center offset is zero (ideal camera)
             cam_infos.append(CameraInfo(uid=idx, R=R, T=T, K=K, FovY=FovY, FovX=FovX, image=image,
-                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
+                                    normal_map=None, has_normal=False,
+                                    pseudo_diffuse_map=None, has_pseudo_diffuse=False,
+                                    pseudo_specular_map=None, has_pseudo_specular=False,
+                                    image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
             
     return cam_infos
 
@@ -299,6 +340,7 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png"):
                            test_cameras=test_cam_infos,
                            nerf_normalization=nerf_normalization,
                            ply_path=ply_path)
+    
     return scene_info
 
 sceneLoadTypeCallbacks = {

@@ -146,9 +146,10 @@ class GaussianModel:
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
-            self.optimizer.state_dict(),
-            self.spatial_lr_scale,
             self._uncertainty, 
+            self.optimizer.state_dict(),
+            self.spatial_lr_scale
+            
         )
     
     def restore(self, model_args, training_args):
@@ -171,8 +172,8 @@ class GaussianModel:
         self._normal2,  
         self.max_radii2D, 
         xyz_gradient_accum, 
-        self._uncertainty,
         denom,
+        self._uncertainty,
         opt_dict, 
         self.spatial_lr_scale) = model_args
         
@@ -363,7 +364,7 @@ class GaussianModel:
 
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def training_setup(self, training_args):
+    def training_setup(self, training_args, projection_head=None):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -395,6 +396,9 @@ class GaussianModel:
             {'params': [self._indirect_rest], 'lr': training_args.indirect_lr / 20.0, "name": "ind_rest"},
             {'params': [self._indirect_asg], 'lr': training_args.asg_lr, "name": "ind_asg"},
         ])
+        # <<--- 바로 이 부분을 추가해야 합니다 ---<<
+        if projection_head is not None:
+            l.append({'params': projection_head.parameters(), 'lr': training_args.contrastive_lr, "name": "projection_head"})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
@@ -617,13 +621,14 @@ class GaussianModel:
     
     def reset_roughness(self, reset_value=0.1):
         roughness_new = torch.full_like(self._roughness, reset_value, dtype=torch.float, device="cuda")
-        optimizable_tensors = self.replace_tensor_to_optimizer(self.inverse_refl_activation(roughness_new), "roughness")
+        optimizable_tensors = self.replace_tensor_to_optimizer(self.inverse_roughness_activation(roughness_new), "roughness")
         if "roughness" in optimizable_tensors:
             self._roughness = optimizable_tensors["roughness"]
 
 
     def load_ply(self, path, relight=False, args=None):
         plydata = PlyData.read(path)
+        
 
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
                         np.asarray(plydata.elements[0]["y"]),
@@ -738,15 +743,17 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
         
         
-        # <<-- 이 부분을 추가하여, ply에 uncertainty가 없더라도 GPU에 생성해줍니다.
-        if "uncertainty" not in plydata.elements[0].properties:
+        props = [p.name for p in plydata.elements[0].properties]
+        if "uncertainty" not in props:
             print("No uncertainty found in PLY, initializing to default.")
-            num_points = self._xyz.shape[0]
+            num_points = xyz.shape[0]  # ← self._xyz가 아니라 xyz 길이를 사용
             uncertainty = torch.full((num_points, 1), 1e-4, dtype=torch.float, device="cuda")
             self._uncertainty = nn.Parameter(uncertainty.requires_grad_(True))
         else:
-            uncertainty = np.asarray(plydata.elements[0]["uncertainty"])[..., np.newaxis]
-            self._uncertainty = nn.Parameter(torch.tensor(uncertainty, dtype=torch.float, device="cuda").requires_grad_(True))
+            uncertainty_np = np.asarray(plydata.elements[0]["uncertainty"])[..., np.newaxis]
+            self._uncertainty = nn.Parameter(
+                torch.tensor(uncertainty_np, dtype=torch.float, device="cuda").requires_grad_(True)
+            )
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
@@ -767,7 +774,7 @@ class GaussianModel:
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if group["name"] == "mlp" or group["name"] == "env" or group["name"] == "env2": continue   # #
+            if group["name"] in ["mlp", "env", "env2", "projection_head"]: continue   # #
             stored_state = self.optimizer.state.get(group['params'][0], None)
 
             if stored_state is not None:
@@ -815,7 +822,7 @@ class GaussianModel:
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if group["name"] == "mlp" or group["name"] == "env" or group["name"] == "env2": continue   # #
+            if group["name"] in ["mlp", "env", "env2", "projection_head"] : continue   # #
             assert len(group["params"]) == 1
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
@@ -981,6 +988,10 @@ class GaussianModel:
     def update_mesh(self, mesh):
         vertices = np.asarray(mesh.vertices).astype(np.float32)
         faces = np.asarray(mesh.triangles).astype(np.int32)
+        if vertices.size == 0 or faces.size == 0:
+            print("[ERROR] Cannot build RayTracer: empty vertices/faces")
+            self.ray_tracer = None
+            return
         self.ray_tracer = raytracing.RayTracer(vertices, faces)
 
     def load_mesh_from_ply(self, model_path, iteration):
@@ -988,7 +999,15 @@ class GaussianModel:
         import os
 
         ply_path = os.path.join(model_path, f'test_{iteration:06d}.ply')
+        if not os.path.exists(ply_path):
+            print(f"[ERROR] Mesh file not found: {ply_path}")
+            self.ray_tracer = None
+            return False
         mesh = o3d.io.read_triangle_mesh(ply_path)
+        if mesh.is_empty() or len(mesh.triangles) == 0 or len(mesh.vertices) == 0:
+            print(f"[ERROR] Empty mesh loaded: {ply_path}")
+            self.ray_tracer = None
+            return False
         self.update_mesh(mesh)
-        
+        return True
     

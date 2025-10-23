@@ -1,1 +1,0 @@
-psnr:nan, ssim:nan, lpips:nan, fps:nan

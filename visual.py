@@ -25,22 +25,24 @@ from utils.image_utils import visualize_depth # 추가
 # eval.py 파일 내
 
 # <<-- H, W 인자를 추가
-def apply_colormap(tensor_gray, H, W, cmap='jet'):
-    """단일 채널 텐서에 컬러맵을 적용합니다."""
-    # <<-- 빈 텐서일 경우, 전달받은 H, W 크기로 검은색 이미지를 생성
+def apply_colormap(tensor_gray, H, W, cmap='jet', vmin=0.0, vmax=1.0):
+    """단일 채널 텐서에 컬러맵을 적용하고 값의 범위를 조절합니다."""
     if tensor_gray.numel() == 0:
         return torch.zeros(3, H, W, device='cuda')
 
     tensor_gray = tensor_gray.squeeze().cpu().numpy()
-    min_val, max_val = np.min(tensor_gray), np.max(tensor_gray)
-    if max_val - min_val > 0:
-        tensor_gray = (tensor_gray - min_val) / (max_val - min_val)
+    
+    # <<-- 1. 지정된 범위(vmin, vmax)로 값을 제한(clip)합니다.
+    tensor_gray = np.clip(tensor_gray, vmin, vmax)
+    
+    # <<-- 2. 최솟값/최댓값 대신 vmin/vmax를 기준으로 정규화합니다.
+    if vmax - vmin > 0:
+        tensor_gray = (tensor_gray - vmin) / (vmax - vmin)
     
     colormap = cm.get_cmap(cmap)
     colored_image = colormap(tensor_gray)[:, :, :3]
     colored_tensor = torch.from_numpy(colored_image).permute(2, 0, 1)
-
-    # 생성된 텐서의 크기가 원본과 다를 수 있으므로, 최종 크기를 H, W에 맞게 조절 (안전장치)
+    
     colored_tensor = F.interpolate(colored_tensor.unsqueeze(0), size=(H, W), mode='bilinear', align_corners=False).squeeze(0)
     
     return colored_tensor.cuda()
@@ -62,7 +64,8 @@ def save_debug_grid(render_pkg, viewpoint_cam, save_path):
         render_pkg.get("specular_map", torch.zeros_like(error_map)),
         # <<-- apply_colormap 호출 시 H, W를 전달합니다.
         
-        apply_colormap(render_pkg.get("rgb_uncertainty_map", torch.empty(0, device='cuda')), H, W, cmap='jet'),
+        # train.py와 동일하게 vmax=0.5를 지정
+        apply_colormap(render_pkg.get("rgb_uncertainty_map", ...), H, W, cmap='jet', vmax=0.5),
         apply_colormap(render_pkg.get("refl_strength_map", torch.empty(0, device='cuda')), H, W, cmap='jet'),
         apply_colormap(render_pkg.get("roughness_map", torch.empty(0, device='cuda')), H, W, cmap='jet'),
         render_pkg.get("rend_alpha", torch.zeros_like(error_map)).repeat(3, 1, 1),  
@@ -154,24 +157,57 @@ def render_set_train(model_path, views, gaussians, pipeline, background, save_im
 
             
 
-   
 def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, save_ims: bool, op, indirect):
     with torch.no_grad():
-        # 1. 먼저 'gaussians'와 'scene' 객체를 생성합니다.
-        # 이 라인에서 'scene' 변수가 정의됩니다.
         gaussians = GaussianModel(dataset.sh_degree)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
         
-        # 2. 그 외 필요한 변수들을 설정합니다.
+        # 1. 불러올 체크포인트(.pth)의 반복 횟수(iteration)를 결정합니다.
+        if iteration == -1:
+            try:
+                chkpnt_files = [f for f in os.listdir(dataset.model_path) if f.startswith("chkpnt") and f.endswith(".pth")]
+                if not chkpnt_files:
+                    print(f"[ERROR] No checkpoint (.pth) files found in '{dataset.model_path}'.")
+                    return
+                iters = [int(f.replace("chkpnt", "").split('.')[0].replace("_uc", "")) for f in chkpnt_files]
+                loaded_iter = max(iters)
+            except Exception as e:
+                print(f"[ERROR] Could not find or parse checkpoint files in '{dataset.model_path}': {e}")
+                return
+        else:
+            loaded_iter = iteration
+
+        # 2. Scene 객체를 먼저 초기화하여 .ply와 .map(환경맵)을 불러옵니다.
+        #    이 과정을 통해 gaussians.env_map이 정상적으로 설정됩니다.
+        print(f"[INFO] Initializing scene with data from iteration {loaded_iter} to load envmap...")
+        scene = Scene(dataset, gaussians, load_iteration=loaded_iter, shuffle=False)
+
+        # 3. .pth 체크포인트 파일을 불러옵니다.
+        checkpoint_path = os.path.join(dataset.model_path, f"chkpnt{loaded_iter}.pth")
+        uc_checkpoint_path = os.path.join(dataset.model_path, f"chkpnt{loaded_iter}_uc.pth")
+        if os.path.exists(uc_checkpoint_path):
+            checkpoint_path = uc_checkpoint_path
+        
+        print(f"[INFO] Loading full model state from checkpoint: {checkpoint_path}")
+        (model_params, _) = torch.load(checkpoint_path)
+        
+        # 4. .pth 파일의 파라미터로 모델을 최종 복원합니다.
+        #    이 시점에는 gaussians.env_map이 이미 존재하므로 오류가 발생하지 않습니다.
+        gaussians.restore(model_params, op)
+
         background = torch.tensor([1, 1, 1] if dataset.white_background else [0, 0, 0], dtype=torch.float32, device="cuda")
         
-        # ... (indirect, load_mesh 등 다른 설정은 그대로 둡니다) ...
-        iteration = searchForMaxIteration(os.path.join(dataset.model_path, "point_cloud"))
         if indirect:
             op.indirect = 1
-            gaussians.load_mesh_from_ply(dataset.model_path, iteration)
+            try:
+                mesh_files = [f for f in os.listdir(dataset.model_path) if f.startswith("test_") and f.endswith(".ply")]
+                if mesh_files:
+                    mesh_iters = [int(f.replace("test_", "").replace(".ply", "")) for f in mesh_files]
+                    mesh_iteration = max(mesh_iters)
+                    gaussians.load_mesh_from_ply(dataset.model_path, mesh_iteration)
+            except Exception:
+                print("[WARNING] Could not load mesh file. Continuing without it.")
 
-        # 3. 이제 위에서 생성된 'scene' 객체를 사용하여 카메라 리스트를 가져옵니다.
+        # (이하 카메라 리스트 생성 및 render_all 호출 코드는 기존과 동일)
         print("Combining train and test cameras...")
         combined_cameras = scene.getTrainCameras().copy() + scene.getTestCameras().copy()
         
@@ -181,7 +217,6 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
         
         print(f"Total unique cameras to render: {len(all_cameras)}")
         
-        # 4. 최종적으로 렌더링 함수를 호출합니다.
         print("Rendering all sorted cameras...")
         render_all(dataset.model_path, all_cameras, gaussians, pipeline, background, save_ims, op)
 

@@ -16,6 +16,34 @@ from utils.loss_utils import ssim
 from lpipsPyTorch import lpips
 from torchvision.utils import save_image, make_grid
 
+
+import glob, re
+
+def find_latest_mesh_iter(model_path):
+    """Return largest N from files like <model_path>/test_000123.ply; None if none."""
+    ply_list = glob.glob(os.path.join(model_path, "test_*.ply"))
+    if not ply_list:
+        return None
+    iters = []
+    for p in ply_list:
+        m = re.search(r'test_(\d+)\.ply$', os.path.basename(p))
+        if m:
+            iters.append(int(m.group(1)))
+    return max(iters) if iters else None
+# ----------------------------------------
+
+
+def find_latest_mesh_iter(model_path):
+    ply_list = glob.glob(os.path.join(model_path, "test_*.ply"))
+    if not ply_list:
+        return None
+    iters = []
+    for p in ply_list:
+        m = re.search(r'test_(\d+)\.ply$', os.path.basename(p))
+        if m:
+            iters.append(int(m.group(1)))
+    return max(iters) if iters else None
+
 def render_set(model_path, views, gaussians, pipeline, background, save_ims, opt):
     if save_ims:
         # Create directories to save rendered images
@@ -39,7 +67,7 @@ def render_set(model_path, views, gaussians, pipeline, background, save_ims, opt
         
         render_color = torch.clamp(rendering["render"], 0.0, 1.0)
         render_color = render_color[None]
-        gt = torch.clamp(view.original_image, 0.0, 1.0)
+        gt = torch.clamp(view.original_image, 0.0, 1.0).cuda()
         gt = gt[None, 0:3, :, :]
 
         ssims.append(ssim(render_color, gt).item())
@@ -81,7 +109,7 @@ def render_set_train(model_path, views, gaussians, pipeline, background, save_im
  
         render_color = torch.clamp(rendering["render"], 0.0, 1.0)
         render_color = render_color[None]
-        gt = torch.clamp(view.original_image, 0.0, 1.0)
+        gt = torch.clamp(view.original_image, 0.0, 1.0).cuda()
         gt = gt[None, :3, :, :]
 
         if save_ims:
@@ -104,10 +132,19 @@ def render_sets(dataset: ModelParams, iteration: int, pipeline: PipelineParams, 
 
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-        iteration = searchForMaxIteration(os.path.join(dataset.model_path, "point_cloud"))
-        if indirect:
+                # 실제 존재하는 test_*.ply 중 최신 iter를 찾는다
+        
+        mesh_iter = find_latest_mesh_iter(dataset.model_path)
+        if indirect and mesh_iter is not None:
             op.indirect = 1
-            gaussians.load_mesh_from_ply(dataset.model_path, iteration)
+            ok = gaussians.load_mesh_from_ply(dataset.model_path, mesh_iter)
+            if not ok:
+                print(f"[WARN] Mesh load failed at iter {mesh_iter}. Falling back to indirect=0")
+                op.indirect = 0
+        else:
+            if indirect:
+                print("[WARN] No test_*.ply found. Falling back to indirect=0")
+            op.indirect = 0
 
         
         # render_set_train(dataset.model_path, scene.getTrainCameras(), gaussians, pipeline, background, save_ims, op)

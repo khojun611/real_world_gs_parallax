@@ -38,25 +38,17 @@ import matplotlib.cm as cm
 
 
 
-def apply_colormap(tensor_gray, cmap='jet', vmin=0.0, vmax=1.0):
-    """단일 채널 텐서에 컬러맵을 적용하고 값의 범위를 조절합니다."""
+def apply_colormap(tensor_gray, H, W, cmap='jet', vmin=0.0, vmax=1.0):
     if tensor_gray.numel() == 0:
-        # 렌더링 결과의 높이, 너비를 알 수 없으므로 작은 크기로 반환
-        return torch.zeros(3, 16, 16, device='cuda')
-
-    H, W = tensor_gray.shape[-2:]
+        return torch.zeros(3, H, W, device='cuda')
     tensor_gray = tensor_gray.squeeze().cpu().numpy()
-    
     tensor_gray = np.clip(tensor_gray, vmin, vmax)
     if vmax - vmin > 0:
         tensor_gray = (tensor_gray - vmin) / (vmax - vmin)
-    
     colormap = cm.get_cmap(cmap)
     colored_image = colormap(tensor_gray)[:, :, :3]
     colored_tensor = torch.from_numpy(colored_image).permute(2, 0, 1)
-    
     colored_tensor = F.interpolate(colored_tensor.unsqueeze(0), size=(H, W), mode='bilinear', align_corners=False).squeeze(0)
-    
     return colored_tensor.cuda()
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, model_path, debug_from=None):
@@ -142,15 +134,28 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if not initial_stage:
             if iteration <= opt.volume_render_until_iter:
                 envmap2 = gaussians.get_envmap_2 
-                envmap2.build_mips()
+                if envmap2 is not None: envmap2.build_mips()
             else:
                 envmap = gaussians.get_envmap 
-                envmap.build_mips()
+                if envmap is not None: envmap.build_mips()
 
         # Pick a random Camera
         if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
+            train_cams = scene.getTrainCameras().copy()
+            if args.train_on_all:
+                cams = train_cams + scene.getTestCameras().copy()
+            else:
+                cams = train_cams
+            viewpoint_stack = cams
+        # ---- FIX: actually pick one camera for this iteration ----
+        if len(viewpoint_stack) == 0:
+            # refill when exhausted
+            refill = scene.getTrainCameras().copy()
+            if args.train_on_all:
+                refill += scene.getTestCameras().copy()
+            viewpoint_stack = refill
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
+        # ----------------------------------------------------------
 
 
         # Set render
@@ -177,9 +182,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
 
         with torch.no_grad():
+            HAS_RESET0 = False  # ---- FIX: default init every iteration ----
             
             if iteration % TEST_INTERVAL == 0 or iteration == first_iter + 1 or iteration == opt.volume_render_until_iter + 1:
-                save_training_vis(viewpoint_cam, gaussians, background, render, pipe, opt, iteration, initial_stage)
+                save_training_vis(viewpoint_cam, gaussians, background, render, pipe, opt, iteration, initial_stage, tb_dict)
 
             ema_loss_for_log = 0.4 * loss + 0.6 * ema_loss_for_log
             ema_dist_for_log = 0.4 * dist_loss + 0.6 * ema_dist_for_log
@@ -217,7 +223,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Densification
             if iteration < opt.densify_until_iter and iteration != opt.volume_render_until_iter:
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
-                                                                     radii[visibility_filter])
+                                                                        radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration <= opt.init_until_iter:
@@ -281,28 +287,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         iteration += 1
 
-
-
-
-
-
-
-
 # ============================================================
 # Utils for training
 
-
 def select_render_method(iteration, opt, initial_stage):
-
     if initial_stage:
         render = render_initial
     elif iteration <= opt.volume_render_until_iter:
         render = render_volume
-    else:   
+    else:  
         render = render_surfel
-
     return render
-
 
 def set_gaussian_para(gaussians, opt, vol=False):
     gaussians.enlarge_scale = opt.enlarge_scale
@@ -318,26 +313,22 @@ def reset_gaussian_para(gaussians, opt):
     gaussians.refl_msk_thr = opt.refl_msk_thr
     gaussians.rough_msk_thr = opt.rough_msk_thr
 
-
-
-
-def save_training_vis(viewpoint_cam, gaussians, background, render_fn, pipe, opt, iteration, initial_stage):
+def save_training_vis(viewpoint_cam, gaussians, background, render_fn, pipe, opt, iteration, initial_stage, tb_dict):
     with torch.no_grad():
         render_pkg = render_fn(viewpoint_cam, gaussians, pipe, background, srgb=opt.srgb, opt=opt)
-
         error_map = torch.abs(viewpoint_cam.original_image.cuda() - render_pkg["render"])
+        H, W = error_map.shape[-2:]
 
         if initial_stage:
             visualization_list = [
                 viewpoint_cam.original_image.cuda(),
                 render_pkg["render"], 
                 render_pkg["rend_alpha"].repeat(3, 1, 1),
-                visualize_depth(render_pkg["surf_depth"]),  
-                render_pkg["rend_normal"] * 0.5 + 0.5, 
-                render_pkg["surf_normal"] * 0.5 + 0.5, 
+                visualize_depth(render_pkg.get("surf_depth", torch.empty(0, device='cuda'))),  
+                render_pkg.get("rend_normal", torch.zeros_like(error_map)) * 0.5 + 0.5, 
+                render_pkg.get("surf_normal", torch.zeros_like(error_map)) * 0.5 + 0.5, 
                 error_map 
             ]
-        # volume 렌더링 단계에서도 uncertainty_map이 있다면 시각화
         elif iteration <= opt.volume_render_until_iter:
             visualization_list = [
                 viewpoint_cam.original_image.cuda(),  
@@ -345,18 +336,17 @@ def save_training_vis(viewpoint_cam, gaussians, background, render_fn, pipe, opt
                 render_pkg.get("base_color_map", torch.zeros_like(error_map)), 
                 render_pkg.get("diffuse_map", torch.zeros_like(error_map)),     
                 render_pkg.get("specular_map", torch.zeros_like(error_map)),  
-                apply_colormap(render_pkg.get("refl_strength_map", torch.zeros_like(error_map)[0])),  
-                apply_colormap(render_pkg.get("roughness_map", torch.zeros_like(error_map)[0])),
+                apply_colormap(render_pkg.get("refl_strength_map", torch.empty(0, device='cuda')), H, W),  
+                apply_colormap(render_pkg.get("roughness_map", torch.empty(0, device='cuda')), H, W),
                 render_pkg["rend_alpha"].repeat(3, 1, 1),  
-                visualize_depth(render_pkg["surf_depth"]), 
-                render_pkg["rend_normal"] * 0.5 + 0.5,  
-                render_pkg["surf_normal"] * 0.5 + 0.5, 
+                visualize_depth(render_pkg.get("surf_depth", torch.empty(0, device='cuda'))), 
+                render_pkg.get("rend_normal", torch.zeros_like(error_map)) * 0.5 + 0.5,  
+                render_pkg.get("surf_normal", torch.zeros_like(error_map)) * 0.5 + 0.5, 
                 error_map
             ]
-            # <<-- uncertainty_map이 존재할 경우 리스트에 추가 -->>
             if "rgb_uncertainty_map" in render_pkg:
-                vis_uncertainty = apply_colormap(render_pkg["rgb_uncertainty_map"], cmap='viridis', vmax=0.5) # vmax는 조절 가능
-                visualization_list.insert(5, vis_uncertainty) # specular_map 다음에 추가
+                vis_uncertainty = apply_colormap(render_pkg["rgb_uncertainty_map"], H, W, cmap='viridis', vmax=0.5)
+                visualization_list.insert(5, vis_uncertainty)
             
             if opt.indirect:
                 visualization_list += [
@@ -364,7 +354,6 @@ def save_training_vis(viewpoint_cam, gaussians, background, render_fn, pipe, opt
                     render_pkg["direct_light"],
                     render_pkg["indirect_light"],
                 ]
-        # surfel 렌더링 단계에서 uncertainty_map 시각화
         else:
             visualization_list = [
                 viewpoint_cam.original_image.cuda(),  
@@ -372,23 +361,44 @@ def save_training_vis(viewpoint_cam, gaussians, background, render_fn, pipe, opt
                 render_pkg.get("base_color_map", torch.zeros_like(error_map)),  
                 render_pkg.get("diffuse_map", torch.zeros_like(error_map)),
                 render_pkg.get("specular_map", torch.zeros_like(error_map)),
-                # <<-- uncertainty_map 시각화 코드 추가 -->>
-                apply_colormap(render_pkg.get("rgb_uncertainty_map", torch.zeros_like(error_map)[0]), cmap='viridis', vmax=0.5), # vmax는 조절 가능
-                apply_colormap(render_pkg.get("refl_strength_map", torch.zeros_like(error_map)[0])),  
-                apply_colormap(render_pkg.get("roughness_map", torch.zeros_like(error_map)[0])),
+                apply_colormap(render_pkg.get("rgb_uncertainty_map", torch.empty(0, device='cuda')), H, W, cmap='viridis', vmax=0.5),
+                apply_colormap(render_pkg.get("refl_strength_map", torch.empty(0, device='cuda')), H, W),  
+                apply_colormap(render_pkg.get("roughness_map", torch.empty(0, device='cuda')), H, W),
                 render_pkg["rend_alpha"].repeat(3, 1, 1),  
-                visualize_depth(render_pkg["surf_depth"]),  
-                render_pkg["rend_normal"] * 0.5 + 0.5,  
-                render_pkg["surf_normal"] * 0.5 + 0.5,  
+                visualize_depth(render_pkg.get("surf_depth", torch.empty(0, device='cuda'))),  
+                render_pkg.get("rend_normal", torch.zeros_like(error_map)) * 0.5 + 0.5,  
+                render_pkg.get("surf_normal", torch.zeros_like(error_map)) * 0.5 + 0.5,  
                 error_map, 
             ]
- 
-        # 그리드 이미지 생성 및 저장 (nrow 값을 조절하여 보기 좋게 만듭니다)
-        grid = make_grid(visualization_list, nrow=5) # nrow=5 또는 적절한 값으로 조절
+            # <<-- 핵심 수정: 안전한 키 접근 방식으로 변경 -->>
+            vis_chroma = tb_dict.get("vis_chroma_loss_map")
+            if vis_chroma is not None:
+                print("chroma loss2")
+                vis_chroma = apply_colormap(vis_chroma, H, W, cmap='magma', vmax=0.1)
+                visualization_list.append(vis_chroma)
+
+            vis_hf_mask = tb_dict.get("vis_high_freq_mask")
+            if vis_hf_mask is not None:
+                print("high freq2")
+                vis_hf_mask = apply_colormap(vis_hf_mask, H, W, cmap='gray')
+                visualization_list.append(vis_hf_mask)
+
+        grid = make_grid(visualization_list, nrow=5)
         scale = grid.shape[-2] / 800
         if scale > 1:
             grid = F.interpolate(grid[None], (int(grid.shape[-2] / scale), int(grid.shape[-1] / scale)))[0]
         save_image(grid, os.path.join(args.visualize_path, f"{iteration:06d}.png"))
+
+        if not initial_stage:
+            if opt.volume_render_until_iter > opt.init_until_iter and iteration <= opt.volume_render_until_iter:
+                env_dict = gaussians.render_env_map_2() 
+            else:
+                env_dict = gaussians.render_env_map()
+
+            if "env1" in env_dict and env_dict["env1"] is not None:
+                grid = [env_dict["env1"].permute(2, 0, 1)]
+                grid = make_grid(grid, nrow=1, padding=10)
+                save_image(grid, os.path.join(args.visualize_path, f"{iteration:06d}_env.png"))
 
       
 NORM_CONDITION_OUTSIDE = False
