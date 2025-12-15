@@ -298,11 +298,14 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             FovX = fovx
 
             # For blender datasets, we consider its camera center offset is zero (ideal camera)
+            # --- [수정된 부분] 아래 인자들을 변경된 CameraInfo 정의에 맞게 수정했습니다 ---
             cam_infos.append(CameraInfo(uid=idx, R=R, T=T, K=K, FovY=FovY, FovX=FovX, image=image,
-                                    normal_map=None, has_normal=False,
-                                    pseudo_diffuse_map=None, has_pseudo_diffuse=False,
-                                    pseudo_specular_map=None, has_pseudo_specular=False,
-                                    image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
+                                        normal_map=None, has_normal=False,
+                                        image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1],
+                                        # 기존: pseudo_diffuse_map=..., pseudo_specular_map=...
+                                        # 변경:
+                                        pseudo_material_map=None, has_pseudo_material=False))
+            # --------------------------------------------------------------------------
             
     return cam_infos
 

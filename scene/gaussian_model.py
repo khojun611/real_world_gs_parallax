@@ -14,6 +14,8 @@ from utils.general_utils import strip_symmetric, build_scaling_rotation, safe_no
 from utils.refl_utils import sample_camera_rays, get_env_rayd1, get_env_rayd2
 import raytracing
 import torch.nn.functional as F # <<-- 이 줄을 추가하세요
+from utils.general_utils import build_rotation
+import torch.nn as nn # 파일 상단에 없다면 추가 필요
 
 
 def get_env_direction1(H, W):
@@ -123,6 +125,39 @@ class GaussianModel:
         self.ray_tracer = None
         self.setup_functions()
         
+        # [▼ 추가] 학습 가능한 환경 박스 파라미터 초기화
+        self._env_box_min = torch.tensor([-18.110445, -14.79639,  -15.34217 ], device="cuda")
+        self._env_box_max = torch.tensor([18.131962, 14.775374, 15.332282], device="cuda")
+        self._env_center = torch.tensor([0.0, 0.0, 0.0], device="cuda")
+        
+        # [▼ 추가] Regularization을 위한 '초기 상태(Prior)' 저장용 (학습 X)
+        self.init_env_box_min = None
+        self.init_env_box_max = None
+        self.init_env_center = None
+        
+        self._env_box_quat = nn.Parameter(torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").requires_grad_(True))
+        
+    # scene/gaussian_model.py 클래스 내부
+
+    def freeze_env_box(self):
+        """
+        환경 박스(Box) 관련 파라미터의 LR을 0으로 만들어 학습을 중단시킵니다.
+        """
+        count = 0
+        # Optimizer에 등록된 모든 파라미터 그룹을 돕니다.
+        for group in self.optimizer.param_groups:
+            # 박스 관련 파라미터 이름들 (사용하시는 변수명 모두 포함)
+            # 이름이 이 리스트에 포함되면 학습률을 0으로 죽입니다.
+            if group["name"] in ["env_box_min", "env_box_max", "env_center", "env_rotation", "env_box_quat"]:
+                group["lr"] = 0.0
+                count += 1
+        
+        if count > 0:
+            print(f"\n[INFO] ==============================================")
+            print(f"[INFO] 🧊 Environment Box parameters have been FROZEN! 🧊")
+            print(f"[INFO] (Affected Groups: {count})")
+            print(f"[INFO] -> Optimization will now focus only on Texture.")
+            print(f"[INFO] ==============================================\n")
 
     def capture(self):
         return (
@@ -148,7 +183,19 @@ class GaussianModel:
             self.denom,
             self._uncertainty, 
             self.optimizer.state_dict(),
-            self.spatial_lr_scale
+            self.spatial_lr_scale,
+            # [▼ 추가] 환경 박스 파라미터 저장
+            self._env_box_min,
+            self._env_box_max,
+            self._env_center,
+            # [▼▼▼ 추가: EnvMap 상태 저장 ▼▼▼]
+            self.env_map.state_dict() if self.env_map is not None else None,
+            self.env_map_2.state_dict() if self.env_map_2 is not None else None,
+            # [▼▼▼ 여기 아래에 박스 파라미터 4개를 꼭 추가해주세요! ▼▼▼]
+            self._env_box_min,
+            self._env_box_max,
+            self._env_center,
+            self._env_rotation
             
         )
     
@@ -175,7 +222,60 @@ class GaussianModel:
         denom,
         self._uncertainty,
         opt_dict, 
-        self.spatial_lr_scale) = model_args
+        self.spatial_lr_scale,
+        *extra_params) = model_args
+        
+        
+        # -----------------------------------------------------------------
+        # [추가] 받아낸 extra_params(박스 정보)를 내 변수에 저장
+        # -----------------------------------------------------------------
+        if len(extra_params) >= 4:
+            # -----------------------------------------------------------------
+            # [수정] extra_params에서 딕셔너리(opt_dict 등)를 걸러내고 텐서만 추출
+            # -----------------------------------------------------------------
+            # 1. 텐서인 것만 골라냅니다. (OrderedDict 제외)
+            filtered_params = [p for p in extra_params if isinstance(p, torch.Tensor)]
+        
+            print(f"[INFO] Restoring Environment Box Parameters... (Found {len(extra_params)} extras, {len(filtered_params)} tensors)")
+
+            # [▼▼▼ 수정: 리스트의 '맨 뒤'에서 4개를 가져옵니다 ▼▼▼]
+            if len(filtered_params) >= 4:
+                # -4, -3, -2, -1 인덱스를 사용합니다.
+                self._env_box_min = filtered_params[-4]
+                self._env_box_max = filtered_params[-3]
+                self._env_center  = filtered_params[-2]
+                self._env_rotation = filtered_params[-1]
+                
+                print("[RESTORE] Env Box Synced (Loaded from the end of list):")
+                print(f"   Min: {self._env_box_min.shape}")
+                print(f"   Max: {self._env_box_max.shape}")
+                print(f"   Rot: {self._env_rotation.shape} (Target: 4)") 
+                
+            else:
+                print("[WARN] No Environment Box parameters found. Using default.")
+        
+        
+        # [▼ 추가] 학습 가능하도록 Parameter로 등록
+        self._env_box_min = nn.Parameter(self._env_box_min.requires_grad_(True))
+        self._env_box_max = nn.Parameter(self._env_box_max.requires_grad_(True))
+        self._env_center = nn.Parameter(self._env_center.requires_grad_(True))
+        
+        # [▼▼▼ 핵심 수정: 파라미터 등록 및 Init 값 동기화 ▼▼▼]
+        # 1. 학습 파라미터로 등록 (Gradient 추적)
+        self._env_box_min = nn.Parameter(self._env_box_min.requires_grad_(True))
+        self._env_box_max = nn.Parameter(self._env_box_max.requires_grad_(True))
+        self._env_center = nn.Parameter(self._env_center.requires_grad_(True))
+        
+        # 2. Regularization을 위한 기준점(Init값)도 현재 로드된 값으로 업데이트
+        # (이렇게 해야 로드된 시점을 기준으로 다시 Regularization이 작동하거나, 고정된 상태로 유지됨)
+        self.init_env_box_min = self._env_box_min.detach().clone()
+        self.init_env_box_max = self._env_box_max.detach().clone()
+        self.init_env_center = self._env_center.detach().clone()
+        
+        print(f"[RESTORE] Env Box Synced:")
+        print(f"   Min: {self.init_env_box_min.cpu().numpy()}")
+        print(f"   Max: {self.init_env_box_max.cpu().numpy()}")
+        # -------------------------------------------------------------
         
         self._indirect_asg = nn.Parameter(torch.zeros(self._rotation.shape[0], 32, 5, device='cuda').requires_grad_(True))
         self.training_setup(training_args)
@@ -188,7 +288,151 @@ class GaussianModel:
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "opacity":
                 param_group['lr'] = lr
+    
+    
+    # [1] 이 함수를 클래스 내부에 추가하세요
+    def init_env_box_pca(self):
+        """
+        포인트 클라우드의 주축(PCA)을 분석하여 Env Box의 회전, 중심, 크기를 자동으로 초기화합니다.
+        """
+        print("[GaussianModel] Initializing Env Box using PCA...")
+        with torch.no_grad():
+            # 1. 포인트 데이터 가져오기
+            xyz = self.get_xyz.detach()
+            if xyz.shape[0] == 0:
+                return
 
+            # 2. 중심점 계산 및 이동
+            center = xyz.mean(dim=0)
+            centered_xyz = xyz - center
+
+            # 3. PCA (공분산 행렬 & 고유값 분해)
+            cov = torch.mm(centered_xyz.T, centered_xyz) / (xyz.shape[0] - 1)
+            eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+
+            # 4. 회전 행렬 구성 (Eigenvectors가 주축)
+            # eigh는 오름차순으로 반환하므로, 컬럼 순서를 확인해야 할 수 있으나 
+            # 박스는 축 순서가 바뀌어도 min/max로 커버되므로 그대로 사용합니다.
+            rotation_matrix = eigenvectors
+
+            # 좌표계가 뒤집히지 않도록(det=1) 보정 (Right-handed system 유지)
+            if torch.det(rotation_matrix) < 0:
+                rotation_matrix[:, 2] *= -1
+
+            # 5. Local 좌표계로 변환 (World -> Local)
+            # 투영: P_local = P_world @ R (R의 컬럼이 주축일 때)
+            local_xyz = torch.matmul(centered_xyz, rotation_matrix)
+
+            # 6. 박스 크기(Extent) 계산 (여유분 1.2배)
+            min_xyz = torch.quantile(local_xyz, 0.01, dim=0) * 1.1
+            max_xyz = torch.quantile(local_xyz, 0.99, dim=0) * 1.1
+
+            # [수정된 부분 7. 파라미터 생성 및 주입]
+            # 기존에 변수가 없으면 nn.Parameter로 새로 정의합니다.
+           
+
+            # Center
+            if not hasattr(self, "_env_center"):
+                self._env_center = nn.Parameter(center.requires_grad_(True))
+            else:
+                self._env_center.data = center
+
+            # Min
+            if not hasattr(self, "_env_box_min"):
+                self._env_box_min = nn.Parameter(min_xyz.requires_grad_(True))
+            else:
+                self._env_box_min.data = min_xyz
+
+            # Max
+            if not hasattr(self, "_env_box_max"):
+                self._env_box_max = nn.Parameter(max_xyz.requires_grad_(True))
+            else:
+                self._env_box_max.data = max_xyz
+            
+            # Rotation (쿼터니언 변환 후 저장)
+            q = self._matrix_to_quaternion(rotation_matrix)
+            if not hasattr(self, "_env_rotation"):
+                self._env_rotation = nn.Parameter(q.requires_grad_(True))
+            else:
+                self._env_rotation.data = q
+            
+            print(f" >>> Auto-aligned Center: {center.cpu().numpy()}")
+            # print(f" >>> Auto-aligned Extent: \n Min: {min_xyz.cpu().numpy()} \n Max: {max_xyz.cpu().numpy()}")
+
+    # [2] 회전 행렬 -> 쿼터니언 변환 헬퍼 함수 (필요 시 클래스 내부에 추가)
+    def _matrix_to_quaternion(self, R):
+        """
+        3x3 Rotation Matrix를 (w, x, y, z) 쿼터니언으로 변환
+        """
+        trace = R[0, 0] + R[1, 1] + R[2, 2]
+        if trace > 0:
+            s = 0.5 / torch.sqrt(trace + 1.0)
+            w = 0.25 / s
+            x = (R[2, 1] - R[1, 2]) * s
+            y = (R[0, 2] - R[2, 0]) * s
+            z = (R[1, 0] - R[0, 1]) * s
+        else:
+            if R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+                s = 2.0 * torch.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+                w = (R[2, 1] - R[1, 2]) / s
+                x = 0.25 * s
+                y = (R[0, 1] + R[1, 0]) / s
+                z = (R[0, 2] + R[2, 0]) / s
+            elif R[1, 1] > R[2, 2]:
+                s = 2.0 * torch.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+                w = (R[0, 2] - R[2, 0]) / s
+                x = (R[0, 1] + R[1, 0]) / s
+                y = 0.25 * s
+                z = (R[1, 2] + R[2, 1]) / s
+            else:
+                s = 2.0 * torch.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+                w = (R[1, 0] - R[0, 1]) / s
+                x = (R[0, 2] + R[2, 0]) / s
+                y = (R[1, 2] + R[2, 1]) / s
+                z = 0.25 * s
+        return torch.stack([w, x, y, z])
+    
+    
+    @property
+    def get_env_box(self):
+        return {
+            'min': self._env_box_min,
+            'max': self._env_box_max,
+            'center': self._env_center
+        }
+    
+    @property
+    def get_env_box_rotation_matrix(self):
+        """
+        저장된 쿼터니언(_env_rotation)을 3x3 회전 행렬로 변환하여 반환
+        """
+        # 만약 초기화 전이라 변수가 없다면 단위 행렬 반환
+        if not hasattr(self, "_env_rotation"):
+            return torch.eye(3, device="cuda")
+        
+        # 1. 쿼터니언 정규화 (학습 중 크기가 변할 수 있으므로 필수)
+        q = self._env_rotation
+        q = q / (q.norm() + 1e-6)
+        
+        # 2. Quaternion(w, x, y, z) -> Rotation Matrix 변환 공식
+        w, x, y, z = q[0], q[1], q[2], q[3]
+        
+        R = torch.zeros((3, 3), device=q.device)
+        
+        R[0, 0] = 1 - 2 * (y**2 + z**2)
+        R[0, 1] = 2 * (x * y - z * w)
+        R[0, 2] = 2 * (x * z + y * w)
+        
+        R[1, 0] = 2 * (x * y + z * w)
+        R[1, 1] = 1 - 2 * (x**2 + z**2)
+        R[1, 2] = 2 * (y * z - x * w)
+        
+        R[2, 0] = 2 * (x * z - y * w)
+        R[2, 1] = 2 * (y * z + x * w)
+        R[2, 2] = 1 - 2 * (x**2 + y**2)
+        
+        return R
+    
     @property
     def get_uncertainty(self):
         # softplus는 항상 0 이상의 값을 반환하여 분산 값이 음수가 되는 것을 방지
@@ -304,6 +548,128 @@ class GaussianModel:
     def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, args):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
+        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        
+        
+        """
+        # [▼▼▼ Smart Initialization 구현 (Robust AABB) ▼▼▼]
+        print("Computing Robust AABB for EnvMap Parallax Correction...")
+
+        
+        # 1. 아웃라이어 제거 (하위 1%, 상위 1% 제거)
+        # 노이즈(Floater) 때문에 박스가 무한히 커지는 것을 방지합니다.
+        # 1. 데이터 분포 파악 (크기 계산용)
+        q_min = torch.quantile(fused_point_cloud, 0.01, dim=0)
+        q_max = torch.quantile(fused_point_cloud, 0.99, dim=0)
+        
+        # [▼ 핵심 수정] 중심점을 무조건 (0, 0, 0)으로 고정
+        center = torch.zeros(3, device="cuda")
+        
+        # 2. 크기 계산
+        # 포인트 클라우드의 전체 폭(Width/Height/Depth)을 구합니다.
+        size = q_max - q_min
+        
+        # 3. 마진 적용 (축소)
+        # 예: -0.1이면 각 축에서 10%씩 안으로 들어옴 (전체 크기는 20% 감소)
+        # 50% 축소를 원하시면 -0.25를 넣으시면 됩니다. (양쪽에서 25%씩 까임)
+        margin_ratio = 0.1
+        margin = size * margin_ratio
+        
+        # 4. 원점 기준 대칭 박스 생성
+        # (사이즈 / 2) + (음수 마진) = 축소된 반지름(Half Size)
+        half_size = (size / 2.0) + margin
+        
+        safe_min = center - half_size
+        safe_max = center + half_size
+        
+        # [▼ 추가] 안전장치 (뒤집힘 방지)
+        min_box_size = 0.2
+        current_size = safe_max - safe_min
+        
+        for i in range(3):
+            if current_size[i] < min_box_size:
+                # 너무 작아지면 강제로 최소 크기 확보 (중심 0 유지)
+                safe_min[i] = -min_box_size / 2.0
+                safe_max[i] =  min_box_size / 2.0
+        
+        # 4. 파라미터에 할당
+        self._env_box_min = nn.Parameter(safe_min.requires_grad_(True))
+        self._env_box_max = nn.Parameter(safe_max.requires_grad_(True))
+        self._env_center = nn.Parameter(center.requires_grad_(True))
+        
+        # 5. 초기값 저장
+        self.init_env_box_min = safe_min.detach().clone()
+        self.init_env_box_max = safe_max.detach().clone()
+        self.init_env_center = center.detach().clone()
+        
+        print(f"✅ Smart Init Result (Center Fixed to 0, Shrink {margin_ratio*100}%):")
+        print(f"   Min: {safe_min.detach().cpu().numpy()}")
+        print(f"   Max: {safe_max.detach().cpu().numpy()}")
+        print(f"   Center: {center.detach().cpu().numpy()}")
+        """
+        
+        """
+        # 1. 중심점 계산: "중앙값(Median)" 사용 (노이즈 무시)
+        # 점들이 아무리 흩뿌려져 있어도, 가장 밀집된 곳(물체)의 중심을 찾습니다.
+        center = torch.quantile(fused_point_cloud, 0.5, dim=0)
+        
+        # 2. 박스 크기 설정: "완벽한 대칭 (Symmetric)"
+        # 책상 바닥(-0.2) 같은 가정 없이, 중심에서 모든 방향으로 똑같이 뻗어나갑니다.
+        # 3.0m면 가로세로높이 6m짜리 아주 넉넉한 방이 됩니다. (원하시는 대로 조절 가능)
+        room_radius = 8.0 
+        
+        # 3. 박스 생성 (단순 계산)
+        # Min = Center - Radius
+        # Max = Center + Radius
+        safe_min = center - room_radius
+        safe_max = center + room_radius
+        
+        # 4. 파라미터 할당
+        self._env_box_min = nn.Parameter(safe_min.requires_grad_(True))
+        self._env_box_max = nn.Parameter(safe_max.requires_grad_(True))
+        self._env_center = nn.Parameter(center.requires_grad_(True))
+        
+        # 5. 초기값 저장 (Regularization 및 복원용)
+        self.init_env_box_min = safe_min.detach().clone()
+        self.init_env_box_max = safe_max.detach().clone()
+        self.init_env_center = center.detach().clone()
+        
+        print(f"✅ Generic Init Result:")
+        print(f"   Center (Median): {center.detach().cpu().numpy()}")
+        print(f"   Box Radius: {room_radius}m (Symmetric)")
+        """
+        
+
+        """
+        # [▼▼▼ 여기에 원하는 값을 직접 입력하세요 ▼▼▼]
+        print("[EnvBox] 🔒 Using Hardcoded Box Size")
+
+        # 예시: X(-3~3), Y(-3~3), Z(-0.2~3) 크기의 박스
+        # device="cuda"를 반드시 붙여야 합니다.
+        safe_min = torch.tensor([-7.5, -7.5, -7.5], dtype=torch.float, device="cuda")
+        safe_max = torch.tensor([ 7.5,  7.5,  7.5], dtype=torch.float, device="cuda")
+
+        # 중심점(Center)은 min/max의 중간으로 다시 계산하는 것이 안전합니다.
+        center = (safe_min + safe_max) / 2.0
+        # -----------------------------------------------------
+
+        # 4. 파라미터에 할당 (이하는 기존과 동일)
+        self._env_box_min = nn.Parameter(safe_min.requires_grad_(True))
+        self._env_box_max = nn.Parameter(safe_max.requires_grad_(True))
+        self._env_center = nn.Parameter(center.requires_grad_(True))
+        
+        # 5. 초기값 저장 (Regularization용)
+        self.init_env_box_min = safe_min.detach().clone()
+        self.init_env_box_max = safe_max.detach().clone()
+        self.init_env_center = center.detach().clone()
+        
+        print(f"✅ Hardcoded Init Result:")
+        print(f"   Min: {safe_min.detach().cpu().numpy()}")
+        print(f"   Max: {safe_max.detach().cpu().numpy()}")
+        print(f"   Center: {center.detach().cpu().numpy()}")
+        """
+        self._env_box_quat = nn.Parameter(torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda").requires_grad_(True))
+        
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
         sh_features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         sh_features[:, :3, 0 ] = fused_color
@@ -339,6 +705,11 @@ class GaussianModel:
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
 
+        
+        self.init_env_box_pca()
+        
+        
+        
         self._refl_strength = nn.Parameter(refl_strength.requires_grad_(True))  
         self._ori_color = nn.Parameter(ori_color.requires_grad_(True)) 
         self._diffuse_color = nn.Parameter(diffuse_color.requires_grad_(True))  # Initialize _diffuse_color
@@ -368,6 +739,18 @@ class GaussianModel:
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        
+        
+        
+        # [▼ 추가] Parameter로 확실히 등록 (Restore를 안 거쳤을 경우 대비)
+        if not isinstance(self._env_box_min, nn.Parameter):
+            self._env_box_min = nn.Parameter(self._env_box_min.requires_grad_(True))
+            self._env_box_max = nn.Parameter(self._env_box_max.requires_grad_(True))
+            self._env_center = nn.Parameter(self._env_center.requires_grad_(True))
+            
+        # [▼ 추가] 파라미터 안전 장치
+        if not isinstance(self._env_box_quat, nn.Parameter):
+             self._env_box_quat = nn.Parameter(self._env_box_quat.requires_grad_(True))
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
@@ -381,6 +764,10 @@ class GaussianModel:
             {'params': self.env_map_2.parameters(), 'lr': training_args.envmap_cubemap_lr, "name": "env2"}     
         ]
 
+        
+        
+        
+        
         self._normal1.requires_grad_(requires_grad=False)
         self._normal2.requires_grad_(requires_grad=False)
         l.extend([
@@ -400,12 +787,45 @@ class GaussianModel:
         if projection_head is not None:
             l.append({'params': projection_head.parameters(), 'lr': training_args.contrastive_lr, "name": "projection_head"})
 
+        # [▼▼▼ Box Parameter 학습 여부 토글 (Training Toggle) ▼▼▼]
+        if getattr(training_args, "train_env_box", False): # 옵션이 True인지 확인
+            print(f"[INFO] Environment Box Training Enabled! (LR: {training_args.env_box_lr})")
+            
+            # 1. Min/Max/Center 추가
+            if hasattr(self, "_env_box_min"):
+                l.append({'params': [self._env_box_min], 'lr': training_args.env_box_lr, "name": "env_box_min"})
+                l.append({'params': [self._env_box_max], 'lr': training_args.env_box_lr, "name": "env_box_max"})
+                l.append({'params': [self._env_center],  'lr': training_args.env_box_lr, "name": "env_center"})
+            
+            # 2. Rotation 추가 (이게 있어야 회전도 학습됨!)
+            if hasattr(self, "_env_rotation"):
+                l.append({'params': [self._env_rotation], 'lr': training_args.env_box_lr, "name": "env_rotation"})
+        else:
+             print("[INFO] Environment Box Training DISABLED.")
+        
+        
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
 
+    
+    def get_box_reg_loss(self):
+        """
+        박스가 초기값(Smart Init)에서 너무 멀어지거나 무한대로 커지는 것을 방지하는 MSE Loss
+        """
+        if self.init_env_box_min is None:
+            return torch.tensor(0.0, device="cuda")
+            
+        # 초기값과의 거리(MSE) 계산
+        loss_min = torch.mean((self._env_box_min - self.init_env_box_min) ** 2)
+        loss_max = torch.mean((self._env_box_max - self.init_env_box_max) ** 2)
+        loss_center = torch.mean((self._env_center - self.init_env_center) ** 2)
+        
+        return loss_min + loss_max + loss_center
+    
+    
     def update_learning_rate(self, iteration):
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "xyz":
@@ -774,7 +1194,15 @@ class GaussianModel:
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if group["name"] in ["mlp", "env", "env2", "projection_head"]: continue   # #
+            if group["name"] in ["mlp", "env", "env2", "projection_head", "env_box_min", "env_box_max", "env_center", "env_box_quat"]: 
+                continue
+            # 2. [강력 추천] 길이로 확인 (Shape Mismatch 방지)
+            # 파라미터 길이가 마스크(점 개수)와 다르면 점 데이터가 아니므로 무조건 건너뜁니다.
+            # 이 코드가 있으면 tensor [4] 같은 게 들어와도 안전하게 넘어갑니다.
+            if len(group["params"][0]) != len(mask):
+                continue
+            # -------------------------------------------------------
+            
             stored_state = self.optimizer.state.get(group['params'][0], None)
 
             if stored_state is not None:
@@ -822,7 +1250,12 @@ class GaussianModel:
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if group["name"] in ["mlp", "env", "env2", "projection_head"] : continue   # #
+            if group["name"] in ["mlp", "env", "env2", "projection_head", "env_box_min", "env_box_max", "env_center", "env_box_quat"]: 
+                continue
+            
+            if 'env_' in group["name"] or group["name"] not in tensors_dict:
+                continue
+            
             assert len(group["params"]) == 1
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)

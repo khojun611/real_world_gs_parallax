@@ -34,6 +34,7 @@ train_sh
 /checkpoints/
 /logs/
 /output/
+/output_abc/
 /results/
 /data/
 *.pt
@@ -43,6 +44,7 @@ train_sh
 *.pb
 *.ckpt
 Miniconda3-latest-Linux-x86_64.sh
+*.map
 
 # 데이터 파일 (대용량)
 *.csv

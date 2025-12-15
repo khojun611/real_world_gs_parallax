@@ -35,7 +35,7 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 import matplotlib.cm as cm
-
+from utils.box_utils import save_box_as_ply # import 필요
 
 
 def apply_colormap(tensor_gray, H, W, cmap='jet', vmin=0.0, vmax=1.0):
@@ -100,6 +100,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     print(f'Propagation until: {opt.normal_prop_until_iter }')
     print(f'Densify until: {opt.densify_until_iter}')
     print(f'Total iterations: {TOT_ITER}')
+    
+    # [▼ 추가] Parallax Correction 활성화 확인 로그
+    if getattr(opt, 'use_parallax_correction', False):
+        print(f"\n >>> [Parallax Correction] ACTIVATED ✅")
+        print(f" >>> Env Box Parameters will be OPTIMIZED.")
+    else:
+        print(f"\n >>> [Parallax Correction] DISABLED ❌")
+        
+        
 
 
     initial_stage = opt.initial
@@ -114,6 +123,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gaussians.update_learning_rate(iteration)
 
 
+        if iteration == 30000:
+            # 만약 중간부터 resume해서 30000을 넘겼다면, 
+            # if iteration == 현재시작iter + 1: 로 잠시 바꿔서 돌리세요.
+            gaussians.freeze_env_box()
+        
         # Increase SH levels every 1000 iterations
         if iteration > opt.feature_rest_from_iter and iteration % 1000 == 0:
             gaussians.oneupSHdegree()
@@ -195,6 +209,39 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_psnr_for_log = 0.4 * psnr(image, gt_image).mean().double().item() + 0.6 * ema_psnr_for_log
             if iteration % TEST_INTERVAL == 0:
                 psnr_test = evaluate_psnr(scene, render, {"pipe": pipe, "bg_color": background, "opt": opt})
+                
+            # [▼ 추가] 500 Iteration 마다 박스 파라미터 변화 출력
+            # [▼ 추가] 500 Iteration 마다 박스 파라미터 변화 출력
+            if iteration % 500 == 0 and getattr(opt, 'use_parallax_correction', False):
+                box = gaussians.get_env_box
+                
+                # 1. 텐서 값을 CPU로 가져옵니다.
+                b_min = box['min'].data.cpu().numpy()
+                b_max = box['max'].data.cpu().numpy()
+                b_center = box['center'].data.cpu().numpy() # [New] 중심점 가져오기
+                
+                # 2. 회전 행렬 가져오기 (존재할 경우)
+                rot_str = "None"
+                if hasattr(gaussians, 'get_env_box_rotation_matrix'):
+                    # 보기 좋게 첫 행만 출력하거나 전체 출력
+                    rot_mat = gaussians.get_env_box_rotation_matrix.data.cpu().numpy()
+                    rot_str = f"\n{rot_mat}"
+
+                # 3. 출력 (중심점 및 회전 포함)
+                print(f"\n[Iter {iteration}] Parallax Box Status:")
+                print(f"  > Center (XYZ): {b_center}")  # [New] 여기가 수정된 x,y,z 좌표입니다.
+                print(f"  > Size (Min):   {b_min}")
+                print(f"  > Size (Max):   {b_max}")
+                print(f"  > Rotation:     {rot_str}")
+                
+                # [▼ Gradient 확인] 학습이 되고 있는지 체크
+                if box['min'].grad is not None:
+                    # 변화량(Gradient)의 크기(Norm)만 간단히 출력
+                    grad_norm = torch.norm(box['min'].grad).item()
+                    print(f"  > Grad Norm:    {grad_norm:.6f} (Learning is active)")
+                else:
+                    print(f"  > Grad Min:     None (Gradient Flow Broken!)")
+                
             if iteration % 10 == 0:
                 loss_dict = {
                     "Loss": f"{ema_loss_for_log:.{5}f}",
@@ -219,7 +266,30 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration in saving_iterations:
                 print(f"\n[ITER {iteration}] Saving Gaussians")
                 scene.save(iteration)
-
+            
+            
+            if iteration % 3000 == 0:
+                # 1. GaussianModel에서 파라미터 가져오기
+                box = gaussians.get_env_box  # 여기엔 보통 min, max, center가 들어있음
+                
+                # [수정] 회전 행렬을 가져오는 프로퍼티 호출 (이름 확인 필요)
+                # render.py 코드에 따르면 'get_env_box_rotation_matrix' 일 가능성 높음
+                if hasattr(gaussians, 'get_env_box_rotation_matrix'):
+                    rot = gaussians.get_env_box_rotation_matrix
+                else:
+                    rot = None
+                    
+                ply_path = os.path.join(args.model_path, f"env_box_{iteration:05d}.ply")
+                
+                # [수정] save_box_as_ply에 rotation과 center를 함께 전달
+                save_box_as_ply(
+                    ply_path, 
+                    box['min'], 
+                    box['max'], 
+                    rotation=rot, 
+                    center=box['center']  # center도 꼭 넘겨야 제자리에 그려집니다!
+                )
+            
             # Densification
             if iteration < opt.densify_until_iter and iteration != opt.volume_render_until_iter:
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter],
@@ -382,6 +452,21 @@ def save_training_vis(viewpoint_cam, gaussians, background, render_fn, pipe, opt
                 print("high freq2")
                 vis_hf_mask = apply_colormap(vis_hf_mask, H, W, cmap='gray')
                 visualization_list.append(vis_hf_mask)
+            # [Parallax Correction 확인용] Diff Map을 그리드에 추가
+            if "parallax_diff_map" in render_pkg and render_pkg["parallax_diff_map"] is not None:
+                diff_map = render_pkg["parallax_diff_map"]
+                
+                # 1. 터미널 로그 출력 (작동 여부 확인)
+                diff_max = diff_map.max().item()
+                diff_mean = diff_map.mean().item()
+                print(f"[Iter {iteration}] Parallax Diff -> Max: {diff_max:.6f}, Mean: {diff_mean:.6f}")
+
+                # 2. 리스트에 추가 (그리드 맨 마지막 칸에 들어감)
+                # plasma 컬러맵 사용: 값이 클수록(많이 꺾일수록) 밝고 노란색으로 표시됨
+                vis_diff = apply_colormap(diff_map, H, W, cmap='plasma', vmin=0.0, vmax=0.5)
+                visualization_list.append(vis_diff)
+                
+                
 
         grid = make_grid(visualization_list, nrow=5)
         scale = grid.shape[-2] / 800
@@ -537,6 +622,14 @@ if __name__ == "__main__":
             "./output/", f"{last_subdir}/",
             f"{last_subdir}-{current_time}"
         )
+        
+    # [▼▼▼ 수정된 부분: 들여쓰기를 밖으로 뺐습니다! ▼▼▼]
+    # 위 if문과 상관없이 무조건 실행되어야 합니다.
+    if not args.checkpoint_iterations:
+        args.checkpoint_iterations = args.save_iterations.copy()
+        print(f"[INFO] Checkpoint iterations auto-set to: {args.checkpoint_iterations}")
+    # ---------------------------------------------------------
+    # ---------------------------------------------------------
 
     print("Optimizing " + args.model_path)
 

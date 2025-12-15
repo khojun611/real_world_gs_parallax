@@ -67,7 +67,7 @@ class ModelParams(ParamGroup):
         self.eval = False
 
         # EnvLight Settings
-        self.envmap_max_res = 128
+        self.envmap_max_res = 256
         self.envmap_max_roughness = 0.5
         self.envmap_min_roughness = 0.08
         self.relight = False
@@ -133,8 +133,8 @@ class OptimizationParams(ParamGroup):
         #self.contrastive_patch_size = 16    # 대조 학습에 사용할 패치 크기
         # <<<--- 이 줄을 추가하거나, 기존 줄이 올바른지 확인하세요. ---<<<
         #self.contrastive_temp = 0.07        # 온도(temperature) 파라미터
-        self.use_high_freq_purity_loss = True # 고주파 가중치 사용 여부
-        self.purity_focal_gamma = 2.0 # Focal Loss를 위한 gamma
+        self.use_high_freq_purity_loss = False # 고주파 가중치 사용 여부
+        self.purity_focal_gamma = 0.0 # Focal Loss를 위한 gamma
         self.fourier_cutoff_ratio = 0.3 # 푸리에 마스크의 컷오프 비율
         self.lambda_pseudo_normal = 0.0 # pseudo normal loss
         self.lambda_pseudo_diffuse = 0.0 # diffuse 0 (비활성화)
@@ -161,7 +161,7 @@ class OptimizationParams(ParamGroup):
         self.uncertainty_metallic_threshold = 0.0
         self.metallic_threshold = 0.9
         self.metallic_loss_from_iter = 3000
-        self.lambda_roughness_metal = 0.0      # <<-- 금속 영역의 roughness 손실 가중치
+        self.lambda_roughness_metal = 0.00      # <<-- 금속 영역의 roughness 손실 가중치
         self.lambda_roughness_non_metal = 0.0  # <<-- 비금속 영역의 roughness 손실 가중치
         # ----------------------------------------------------
         # --- 여기까지 추가 ---
@@ -189,7 +189,7 @@ class OptimizationParams(ParamGroup):
         self.refl_msk_thr_vol = 0.02
 
         self.enlarge_scale = 1.5
-        self.train_on_all = True
+        self.train_on_all = False
         # Opacity and Densify Settings
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
@@ -215,7 +215,7 @@ class OptimizationParams(ParamGroup):
         self.contrastive_from_iter = 300000   # <<<--- 이 줄을 추가하세요.
         
         self.indirect = 0
-        self.indirect_from_iter =  20000 
+        self.indirect_from_iter =  80000 
 
         self.feature_rest_from_iter = 5_000
         self.normal_prop_until_iter = 25_000 
@@ -231,6 +231,24 @@ class OptimizationParams(ParamGroup):
         self.use_env_scope = False
         self.env_scope_center = [0., 0., 0.]
         self.env_scope_radius = 0.0
+        
+        
+        
+        # --- [Parallax Correction Settings] ---
+        # Parallax Correction 활성화 여부 및 박스 설정
+        self.use_parallax_correction = True
+        # Box Min/Max: Scene 크기에 맞춰 설정 필요 (예: 방의 모서리 좌표)
+        #self.env_box_min = [-3.0, -3.0, -3.0] 
+        #self.env_box_max = [3.0, 3.0, 3.0]
+        # 큐브맵의 중심 위치 (보통 0,0,0)
+        #self.env_center = [0.0, 0.0, 0.0]
+        #self.env_box_lr = 0.05
+        # --------------------------------------
+        # [▼▼▼ 추가된 옵션들 ▼▼▼]
+        self.train_env_box = True     # True일 때만 박스 크기를 학습(Fine-tuning)함
+        self.env_box_lr = 0.01          # 박스 파라미터 학습률
+        self.lambda_box_reg = 0.05       # 박스 크기가 초기값에서 너무 벗어나지 않게 잡는 규제 가중치
+        # --------------------------------------
         
         # SRGB Transformation
         self.srgb = False

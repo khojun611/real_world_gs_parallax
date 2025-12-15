@@ -1,0 +1,2 @@
+python train.py -s ../../marigold/pcc_monkey -m output/pcc_monkey3 --eval --iterations 60000 --initial 1 --init_until_iter 3000  -r 1 
+python train.py -s ../../marigold/pcc_pot5_150 -m output/pcc_pot5 --eval --iterations 60000 --initial 1 --init_until_iter 3000  -r 1 

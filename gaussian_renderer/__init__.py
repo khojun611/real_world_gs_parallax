@@ -329,28 +329,6 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     # 방금 추가한 uncertainty 채널을 여기서 분리합니다.
     rendered_uncertainty = rendered_features[8:9]
     
-    """
-    # --- ▼▼▼ 여기에 디버깅 코드를 추가하세요 ▼▼▼ ---
-    print(f"\n--- [DEBUG] In render_surfel for view: {viewpoint_camera.image_name} ---")
-    
-    # 1. 원본 Uncertainty 파라미터 상태 확인 (래스터라이저 입력 전)
-    #    이 값이 초기값(예: 1e-4)으로만 나온다면, load_ply에 문제가 있는 것입니다.
-    source_uncertainty = pc.get_uncertainty
-    if source_uncertainty.numel() > 0:
-        print(f"[Source]   pc.get_uncertainty stats >> Shape: {source_uncertainty.shape}, Min: {source_uncertainty.min().item():.6f}, Max: {source_uncertainty.max().item():.6f}, Mean: {source_uncertainty.mean().item():.6f}")
-    else:
-        print("[Source]   pc.get_uncertainty is EMPTY!")
-
-    # 2. 렌더링된 Uncertainty 맵 상태 확인 (래스터라이저 출력 후)
-    #    Source는 정상인데 이 값이 이상하다면, 래스터라이저 전달/해석 과정의 문제입니다.
-    if rendered_uncertainty.numel() > 0:
-        print(f"[Rendered] rendered_uncertainty stats >> Shape: {rendered_uncertainty.shape}, Min: {rendered_uncertainty.min().item():.6f}, Max: {rendered_uncertainty.max().item():.6f}, Mean: {rendered_uncertainty.mean().item():.6f}")
-    else:
-        print("[Rendered] rendered_uncertainty is EMPTY!")
-        
-    print("--------------------------------------------------------------------")
-    """
-
     # 2DGS normal and regularizations
     regularizations = compute_2dgs_normal_and_regularizations(allmap, viewpoint_camera, pipe)
     render_alpha = regularizations['render_alpha']
@@ -364,10 +342,47 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     normal_map = render_normal.permute(1,2,0)
     normal_map = normal_map / render_alpha.permute(1,2,0).clamp_min(1e-6)
     
+    
+    # [▼ 수정할 부분 시작] -------------------------------------------------
+    # 기존에 opt에서 고정값을 읽던 부분을 pc.get_env_box로 변경합니다.
+    box_args = None
+    if opt is not None and getattr(opt, 'use_parallax_correction', False):
+        # pc(GaussianModel)에서 학습 중인 현재 값을 가져옵니다.
+        learned_box = pc.get_env_box
+        # [▼ 추가] 회전 행렬 가져오기
+        box_rotation = pc.get_env_box_rotation_matrix 
+        
+        box_args = {
+            'min': learned_box['min'],
+            'max': learned_box['max'],
+            'center': learned_box['center'],
+            'rotation': box_rotation # [New] (3, 3) Matrix 전달
+        }
+    # [▲ 수정할 부분 끝] ---------------------------------------------------
+    
+    
+
     if opt.indirect:
-        specular, extra_dict = get_specular_color_surfel(pc.get_envmap, albedo.permute(1,2,0), viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, normal_map, render_alpha.permute(1,2,0), refl_strength=refl_strength.permute(1,2,0), roughness=roughness.permute(1,2,0), pc=pc, surf_depth=surf_depth, indirect_light=indirect_light.permute(1,2,0))
+        specular, extra_dict = get_specular_color_surfel(
+            pc.get_envmap, albedo.permute(1,2,0), 
+            viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, 
+            normal_map, render_alpha.permute(1,2,0), 
+            refl_strength=refl_strength.permute(1,2,0), 
+            roughness=roughness.permute(1,2,0), 
+            pc=pc, surf_depth=surf_depth, 
+            indirect_light=indirect_light.permute(1,2,0),
+            box_args=box_args # 전달
+        )
     else:
-        specular, extra_dict = get_specular_color_surfel(pc.get_envmap, albedo.permute(1,2,0), viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, normal_map, render_alpha.permute(1,2,0), refl_strength=refl_strength.permute(1,2,0), roughness=roughness.permute(1,2,0), pc=pc, surf_depth=surf_depth)
+        specular, extra_dict = get_specular_color_surfel(
+            pc.get_envmap, albedo.permute(1,2,0), 
+            viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, 
+            normal_map, render_alpha.permute(1,2,0), 
+            refl_strength=refl_strength.permute(1,2,0), 
+            roughness=roughness.permute(1,2,0), 
+            pc=pc, surf_depth=surf_depth,
+            box_args=box_args # 전달
+        )
 
     # Integrate the final image
     final_image = (1-refl_strength) * base_color + specular 
@@ -384,6 +399,12 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
         indirect_color = (1-refl_strength) * base_color + extra_dict['indirect_color']
         indirect_color = indirect_color + bg_color[:, None, None] * (1 - render_alpha)
         extra_dict['indirect_color'] = indirect_color
+        
+        
+    # [▼▼▼ 추가할 코드 시작 ▼▼▼]
+    # extra_dict에서 값을 꺼내옵니다. 없으면 None.
+    parallax_diff_map = extra_dict.get("parallax_diff", None)
+    # [▲▲▲ 추가할 코드 끝 ▲▲▲]
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
@@ -394,6 +415,7 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
             "base_color_map": albedo,
             "roughness_map": roughness,
             "rgb_uncertainty_map": rendered_uncertainty, # <<-- 4. 최종 결과에 불확실성 맵 추가
+            "parallax_diff_map": parallax_diff_map, # <--- results 딕셔너리에 이 줄 추가!
             "viewspace_points": means2D,
             "visibility_filter" : radii > 0,
             "radii": radii,
@@ -582,31 +604,6 @@ def render_volume(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     else:
         render_rgb_uncertainty_map = rendered_features[11:12]
     
-    """
-    # --- ▼▼▼ 여기에 디버깅 코드를 추가하세요 ▼▼▼ ---
-    print(f"\n--- [DEBUG] In render_volume for view: {viewpoint_camera.image_name} ---")
-    
-    # 1. 원본 Uncertainty 파라미터 상태 확인
-    source_uncertainty = pc.get_uncertainty
-    if source_uncertainty.numel() > 0:
-        print(f"[Source]   pc.get_uncertainty stats >> Shape: {source_uncertainty.shape}, Min: {source_uncertainty.min().item():.6f}, Max: {source_uncertainty.max().item():.6f}, Mean: {source_uncertainty.mean().item():.6f}")
-    else:
-        print("[Source]   pc.get_uncertainty is EMPTY!")
-
-    # 2. 렌더링된 Uncertainty 맵 상태 확인
-    if 'render_rgb_uncertainty_map' in locals() and render_rgb_uncertainty_map.numel() > 0:
-        print(f"[Rendered] rendered_uncertainty stats >> Shape: {render_rgb_uncertainty_map.shape}, Min: {render_rgb_uncertainty_map.min().item():.6f}, Max: {render_rgb_uncertainty_map.max().item():.6f}, Mean: {render_rgb_uncertainty_map.mean().item():.6f}")
-    else:
-        print("[Rendered] rendered_uncertainty is EMPTY or not defined!")
-        
-    print("--------------------------------------------------------------------")
-    # --- ▲▲▲ 여기까지 추가 ▲▲▲ ---
-    """
-
-
-
-
-
     # 2DGS normal and regularizations
     regularizations = compute_2dgs_normal_and_regularizations(allmap, viewpoint_camera, pipe)
     render_alpha = regularizations['render_alpha']
@@ -661,6 +658,3 @@ def render_volume(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
         )
 
     return results
-
-
-
