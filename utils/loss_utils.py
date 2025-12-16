@@ -232,39 +232,8 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
         tb_dict["loss_l1"] = Ll1.item()
         
     else:
-        # [수정] 일반 L1 대신 'Metallic Weighted L1' 적용
-        # 1. 픽셀별 오차 계산 (평균 내지 않음)
-        l1_diff = torch.abs(rendered_image - gt_image)
-        
-        # 2. 가중치 맵 생성
-        # 기본 가중치 1.0, 금속 영역은 +10.0 (총 11.0배 중요하게 취급)
-        pixel_weight = 1.0
-        
-        # [수정] 속성이 존재하고(hasattr), 그 값이 None이 아닐 때만(is not None) 실행
-        if hasattr(viewpoint_camera, "pseudo_material_map") and viewpoint_camera.pseudo_material_map is not None:
-            # [수정] 마스크 데이터 가져오기
-            raw_mask = viewpoint_camera.pseudo_material_map
-            
-            # [핵심 수정] 차원(ndim)을 확인하여 안전하게 (1, H, W)로 변환
-            if raw_mask.ndim == 2:
-                # (H, W) -> (1, H, W) : 차원 추가
-                metal_mask = raw_mask.unsqueeze(0).cuda()
-            elif raw_mask.shape[0] == 1:
-                # (1, H, W) : 그대로 사용
-                metal_mask = raw_mask.cuda()
-            else:
-                # (3, H, W) 등 다채널인 경우 : 사용자의 원래 의도대로 1번 채널 사용
-                # (만약 RGB 마스크라면 G채널, 아니라면 0:1로 수정 고려)
-                metal_mask = raw_mask[1:2, :, :].cuda()
-            
-            # 금속 영역에 가중치 10배 추가 (조절 가능)
-            metal_weight_scale = 3.0
-            
-            # 브로드캐스팅을 위해 metal_mask가 (1, H, W)인지 확인
-            pixel_weight = 1.0 + (metal_mask * metal_weight_scale)
-            
-        # 3. 가중 평균 Loss 계산
-        image_loss = (l1_diff * pixel_weight).mean()
+        # 일반 학습 단계에서는 기존 L1 손실만 사용
+        image_loss = l1_loss(rendered_image, gt_image)
         tb_dict["loss_l1"] = image_loss.item()
     
     # --- 3. 주 손실과 SSIM 손실 조합 ---
@@ -334,6 +303,38 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
     else:
         tb_dict["loss_hint"] = 0.0
             
+    # 고주파 가중 크로마티시티 손실
+    if opt.lambda_purity > 0 and iteration > opt.purity_loss_from_iter:
+        diffuse_map = render_pkg.get("diffuse_map")
+        # rendered_image를 새로 가져오지 않고 이미 언패킹된 변수를 사용합니다.
+        if diffuse_map is not None and rendered_image is not None and diffuse_map.numel() > 0:
+            purity_diffuse = calculate_purity(diffuse_map)
+            purity_total = calculate_purity(rendered_image)
+            chroma_loss_map = F.relu(purity_total - purity_diffuse)
+            # chroma_loss_map = F.relu(purity_diffuse - purity_total )
+            # <<-- 시각화를 위해 맵을 tb_dict에 저장 -->>
+            tb_dict["vis_chroma_loss_map"] = chroma_loss_map
+            
+            if opt.use_high_freq_purity_loss:
+                high_freq_mask = create_fourier_high_frequency_mask(gt_image, opt.fourier_cutoff_ratio)
+                # <<-- 시각화를 위해 마스크를 tb_dict에 저장 -->>
+                tb_dict["vis_high_freq_mask"] = high_freq_mask
+
+                # 오차가 큰 부분에 더 큰 가중치를 부여 (Focal Loss)
+                focal_weight = (chroma_loss_map + 1e-6) ** opt.purity_focal_gamma
+
+                # 고주파 마스크와 Focal Loss 가중치를 모두 적용
+                final_loss_map = focal_weight*chroma_loss_map
+                chroma_loss = final_loss_map.mean()
+            else:
+                chroma_loss = chroma_loss_map.mean()
+
+            tb_dict["loss_purity"] = chroma_loss.item()
+            loss += opt.lambda_purity * chroma_loss
+        else:
+            tb_dict["loss_purity"] = 0.0
+    else:
+        tb_dict["loss_purity"] = 0.0
     
     if opt.lambda_pseudo_normal > 0 and iteration > opt.pseudo_normal_from_iter and viewpoint_camera.has_normal:
             rendered_normal = render_pkg['rend_normal']
@@ -401,131 +402,54 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
     # --- 여기까지 새로운 Loss 추가 ---
     # --- Metallic 맵 기반의 조건부 손실 ---
     # --- Metallic 맵 기반의 조건부 손실 ---
-    # <<-- 핵심 수정: iteration > opt.metallic_loss_from_iter 조건을 추가했습니다. -->>
-    # --- Metallic 맵 기반의 조건부 손실 ---
-    # --- Metallic 맵 기반의 조건부 손실 ---
     if opt.lambda_metallic_supervision > 0 and iteration > opt.metallic_loss_from_iter and viewpoint_camera.has_pseudo_material:
         
         refl_strength_map = render_pkg.get("refl_strength_map")
         diffuse_map = render_pkg.get("diffuse_map")
-        roughness_map = render_pkg.get("roughness_map")
+        roughness_map = render_pkg.get("roughness_map") # <<-- roughness_map 가져오기
         
-        # --- ▼▼▼ 이 부분이 핵심 수정 사항입니다 ▼▼▼ ---
-
-        # (H, W) 형태의 단일 채널 material map을 직접 불러옵니다.
-        # --- ▼▼▼ 방법 1: SAM 마스크 + 기본값 추가 ▼▼▼ ---
-
-        # 1. (H, W) 형태의 SAM 마스크를 불러옵니다. (bool 또는 0/1 int 타입 가정)
-        sam_mask = viewpoint_camera.pseudo_material_map
-        
-        # 2. 배경에 부여할 기본 반사율을 정의합니다. (하이퍼파라미터)
-        base_reflectivity = 0.0
-        
-        # 3. 마스크를 float 타입으로 변환하고 기본값을 더해줍니다.
-        #    객체(1.0)는 1.0을 유지하도록 torch.clamp를 사용합니다.
-        single_channel_metallic_map = torch.clamp(
-            sam_mask.float()+base_reflectivity, 
-            0.0, 
-            1.0
-        )
-        
-        # --- ▲▲▲ 여기까지 수정 ▲▲▲ ---
-        
-        # Loss 계산에 사용하기 위해 채널 차원(1)을 추가하여 (1, H, W) 형태로 만듭니다.
-        pseudo_metallic_map = single_channel_metallic_map.unsqueeze(0)
-        
-        # --- ▲▲▲ 여기까지 수정 ▲▲▲ ---
+        pseudo_metallic_slice = viewpoint_camera.pseudo_material_map[:, :, 1:2]
+        pseudo_metallic_map = pseudo_metallic_slice.permute(2, 0, 1)
 
         if all(m is not None for m in [refl_strength_map, diffuse_map, roughness_map, pseudo_metallic_map]):
             
-            # 1단계: refl_strength 직접 감독 (이전과 동일)
+            # 1단계: refl_strength 직접 감독
             loss_metallic = l1_loss(refl_strength_map, pseudo_metallic_map)
             loss += opt.lambda_metallic_supervision * loss_metallic
             tb_dict["loss_metallic_supervision"] = loss_metallic.item()
-            #print("loss_metallic",loss_metallic)
 
-            # 2단계: 조건부 물리 법칙 강제 (Soft Weighting 방식은 그대로 유지)
-            soft_metallic_weight = pseudo_metallic_map.detach()
-            soft_non_metallic_weight = 1.0 - soft_metallic_weight
-            
+            # 2단계: 조건부 물리 법칙 강제
+            metallic_mask = (pseudo_metallic_map > opt.metallic_threshold).float().detach()
+            non_metallic_mask = 1.0 - metallic_mask
+
             # 비금속 영역에 Chroma Loss 적용
             if opt.lambda_purity > 0:
                 purity_diffuse = calculate_purity(diffuse_map)
                 purity_total = calculate_purity(rendered_image)
                 chroma_loss_map = F.relu(purity_total - purity_diffuse)
-                masked_chroma_loss = (chroma_loss_map * soft_non_metallic_weight).sum() / (soft_non_metallic_weight.sum() + 1e-8)
+                masked_chroma_loss = (chroma_loss_map * non_metallic_mask).sum() / (non_metallic_mask.sum() + 1e-8)
                 loss += opt.lambda_purity * masked_chroma_loss
                 tb_dict["loss_purity_non_metallic"] = masked_chroma_loss.item()
 
-            
-            
             # 금속 영역에 Diffuse 억제 손실 적용
             if opt.lambda_diffuse_metal > 0:
-                loss_diffuse_metal = (torch.abs(diffuse_map) * soft_metallic_weight).sum() / (soft_metallic_weight.sum() + 1e-8)
+                loss_diffuse_metal = (torch.abs(diffuse_map) * metallic_mask).sum() / (metallic_mask.sum() + 1e-8)
                 loss += opt.lambda_diffuse_metal * loss_diffuse_metal
                 tb_dict["loss_diffuse_metal"] = loss_diffuse_metal.item()
-                #print("loss_diffuse_metal",loss_diffuse_metal)
 
-            # 3단계: 조건부 거칠기(Roughness) 손실
+            # <<-- 3단계: 조건부 거칠기(Roughness) 손실 추가 -->>
             # 금속 영역은 부드럽게 (roughness -> 0)
             if opt.lambda_roughness_metal > 0:
-                loss_roughness_metal = (torch.abs(roughness_map) * soft_metallic_weight).sum() / (soft_metallic_weight.sum() + 1e-8)
+                loss_roughness_metal = (torch.abs(roughness_map) * metallic_mask).sum() / (metallic_mask.sum() + 1e-8)
                 loss += opt.lambda_roughness_metal * loss_roughness_metal
                 tb_dict["loss_roughness_metal"] = loss_roughness_metal.item()
             
             # 비금속 영역은 거칠게 (roughness -> 1)
             if opt.lambda_roughness_non_metal > 0:
-                loss_roughness_non_metal = (torch.abs(1.0 - roughness_map) * soft_non_metallic_weight).sum() / (soft_non_metallic_weight.sum() + 1e-8)
+                loss_roughness_non_metal = (torch.abs(1.0 - roughness_map) * non_metallic_mask).sum() / (non_metallic_mask.sum() + 1e-8)
                 loss += opt.lambda_roughness_non_metal * loss_roughness_non_metal
                 tb_dict["loss_roughness_non_metallic"] = loss_roughness_non_metal.item()
-                
-                
-        if opt.lambda_specular_luminance > 0 and viewpoint_camera.has_pseudo_material:
-        
-            # 1. 필요한 맵들을 가져옵니다.
-            rendered_specular = render_pkg.get("specular_map")
-            gt_material_map = viewpoint_camera.pseudo_material_map # (1, H, W)라고 가정
-            gt_image = viewpoint_camera.original_image.cuda()
-
-            if rendered_specular is not None:
-                
-                # 2. 각 맵의 휘도를 계산합니다.
-                specular_luminance = rgb_to_luminance(rendered_specular)
-                gt_image_luminance = rgb_to_luminance(gt_image)
-                
-                # 3. GT Material Map을 가중치로 사용하여 L1 손실을 계산합니다.
-                #    Material Map 값이 클수록 (금속에 가까울수록) 손실에 더 큰 영향을 줍니다.
-                error = torch.abs(specular_luminance - gt_image_luminance)
-                weighted_error = error * gt_material_map.detach()
-                
-                # 가중치가 적용된 평균 손실 계산
-                loss_specular_luminance = weighted_error.sum() / (gt_material_map.sum() + 1e-8)
-                
-                # 4. 전체 손실에 추가합니다.
-                loss += opt.lambda_specular_luminance * loss_specular_luminance
-                tb_dict["loss_specular_luminance"] = loss_specular_luminance.item()
-                #print("loss_specular_luminance",loss_specular_luminance)
-        """
-        # [추가] 3) High-Frequency Metallic Loss (선명도 강화)
-        # "금속이면서(Metallic) + 디테일이 있는(High-Freq)" 부분만 집중 타격
-        if opt.lambda_purity > 0:  # lambda_purity 옵션을 같이 쓴다고 가정 (아니면 별도 옵션 추가)
-            
-            # (1) GT 이미지의 엣지/디테일 추출
-            # utils.py에 정의된 create_high_frequency_mask 사용
-            gt_hf_mask = create_high_frequency_mask(gt_image).unsqueeze(0) # (1, H, W)
-            
-            # (2) 타겟 영역 설정 (금속 마스크 AND 고주파 마스크)
-            # pseudo_metallic_map은 위에서 이미 정의됨 ((1, H, W))
-            # pseudo_metallic_map은 0~1 사이 값이므로 곱하면 AND 연산과 유사한 효과
-            target_hf_region = pseudo_metallic_map.detach() * gt_hf_mask
-            
-            # (3) 해당 영역에 강력한 L1 Loss 적용
-            # 렌더링된 이미지와 GT 사이의 차이를 구하되, 타겟 영역에 가중치를 곱함
-            hf_weight = 5.0  # 가중치 (실험적으로 조절 가능)
-            loss_hf_metal = (torch.abs(rendered_image - gt_image) * target_hf_region).mean() * hf_weight
-            
-            loss += opt.lambda_metallic_supervision * loss_hf_metal
-            tb_dict["loss_hf_metal"] = loss_hf_metal.item()
-            """
+    
     
     return loss, tb_dict
+

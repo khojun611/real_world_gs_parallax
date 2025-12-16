@@ -290,6 +290,38 @@ class GaussianModel:
                 param_group['lr'] = lr
     
     
+    # scene/gaussian_model.py 파일 내부
+
+    # ... (기존 메서드들 생략) ...
+
+    # [▼▼▼ 이 함수를 클래스 안에 추가하세요 ▼▼▼]
+    def freeze_env_box_and_boost_texture(self):
+        """
+        박스 파라미터는 얼리고(LR=0), 
+        텍스처(env_map) 파라미터는 LR을 강제로 재설정(Reset)하여 선명도를 높입니다.
+        """
+        box_frozen_count = 0
+        texture_boost_count = 0
+
+        for group in self.optimizer.param_groups:
+            # 1. 박스 관련 파라미터 -> 얼리기 (LR = 0)
+            if group["name"] in ["env_box_min", "env_box_max", "env_center", "env_rotation", "env_box_quat"]:
+                group["lr"] = 0.0
+                box_frozen_count += 1
+            
+            # 2. [핵심] 환경맵 텍스처 -> LR을 강력한 값(예: 0.05)으로 재설정 (Reset)
+            # 주의: 본인 코드에서 환경맵 변수 이름이 'env_map'인지 꼭 확인하세요!
+            elif group["name"] in ["env_map", "env_prob", "background"]: 
+                
+                # [중요] 곱하기(* 10) 대신 그냥 0.05 정도로 고정값을 박으세요!
+                # 3만 iter에서는 LR이 너무 작아서 곱하기로는 효과가 약합니다.
+                group["lr"] = 0.05  
+                
+                texture_boost_count += 1
+                print(f"\n[INFO] 🚀 Texture LR FORCE-RESET to {group['lr']}! (Sharpness Mode ON)")
+
+        
+    
     # [1] 이 함수를 클래스 내부에 추가하세요
     def init_env_box_pca(self):
         """

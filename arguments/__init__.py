@@ -67,7 +67,7 @@ class ModelParams(ParamGroup):
         self.eval = False
 
         # EnvLight Settings
-        self.envmap_max_res = 256
+        self.envmap_max_res = 512
         self.envmap_max_roughness = 0.5
         self.envmap_min_roughness = 0.08
         self.relight = False
@@ -236,7 +236,7 @@ class OptimizationParams(ParamGroup):
         
         # --- [Parallax Correction Settings] ---
         # Parallax Correction 활성화 여부 및 박스 설정
-        self.use_parallax_correction = True
+        self.use_parallax_correction = False
         # Box Min/Max: Scene 크기에 맞춰 설정 필요 (예: 방의 모서리 좌표)
         #self.env_box_min = [-3.0, -3.0, -3.0] 
         #self.env_box_max = [3.0, 3.0, 3.0]
@@ -245,7 +245,7 @@ class OptimizationParams(ParamGroup):
         #self.env_box_lr = 0.05
         # --------------------------------------
         # [▼▼▼ 추가된 옵션들 ▼▼▼]
-        self.train_env_box = True     # True일 때만 박스 크기를 학습(Fine-tuning)함
+        self.train_env_box = False     # True일 때만 박스 크기를 학습(Fine-tuning)함
         self.env_box_lr = 0.01          # 박스 파라미터 학습률
         self.lambda_box_reg = 0.05       # 박스 크기가 초기값에서 너무 벗어나지 않게 잡는 규제 가중치
         # --------------------------------------
