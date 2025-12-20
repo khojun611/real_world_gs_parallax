@@ -120,14 +120,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     while iteration < TOT_ITER:
         iter_start.record()
 
-        
-        gaussians.update_learning_rate(iteration)
+        gaussians.freeze_env_box_and_boost_texture()
 
-        if getattr(opt, "train_env_box", False) and iteration == 30000:
-            print("[INFO] Box Learning Phase Over -> Freezing Box & Boosting Texture!")
+
+        if iteration == 30000:
             # 만약 중간부터 resume해서 30000을 넘겼다면, 
             # if iteration == 현재시작iter + 1: 로 잠시 바꿔서 돌리세요.
-            gaussians.freeze_env_box_and_boost_texture()
+            gaussians.freeze_env_box()
         
         # Increase SH levels every 1000 iterations
         if iteration > opt.feature_rest_from_iter and iteration % 1000 == 0:

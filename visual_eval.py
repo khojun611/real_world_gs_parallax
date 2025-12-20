@@ -184,6 +184,27 @@ def render_set(model_path, views, gaussians, pipeline, background, save_ims, opt
                 # 저장
                 torchvision.utils.save_image(rough_gray, os.path.join(rough_path, f'{stem}.png'))
 
+            # [▼▼▼ 추가: Parallax Difference Map 저장 (Masked) ▼▼▼]
+            if 'parallax_diff_map' in rendering and rendering['parallax_diff_map'] is not None:
+                # 1. 차이맵 가져오기 (이미 렌더러에서 마스킹 처리가 되어서 나옵니다!)
+                diff_map = rendering['parallax_diff_map'] # (1, H, W)
+
+                # 2. (선택사항) 시각적 효과를 위해 밝기 증폭 (Boosting)
+                # 차이가 미세할 수 있으므로 3~5배 정도 곱해서 눈에 잘 띄게 만듭니다.
+                vis_diff = torch.clamp(diff_map * 5.0, 0.0, 1.0)
+                
+                # 3. 컬러맵 적용 (Jet Colormap) -> 빨간색이 큰 차이, 파란색이 작은 차이
+                # 흑백으로 보고 싶으면 이 줄을 빼고 그냥 vis_diff를 저장하세요.
+                H, W = render_color.shape[-2:]
+                vis_diff_color = _apply_colormap(vis_diff, H, W, cmap='jet', vmin=0.0, vmax=1.0)
+                
+                # 4. 저장 폴더 생성 (loop 밖에서 만드는 게 좋지만 안전하게 여기서 체크)
+                diff_path = os.path.join(render_path, 'parallax_diff')
+                os.makedirs(diff_path, exist_ok=True)
+                
+                # 5. 이미지 저장
+                torchvision.utils.save_image(vis_diff_color, os.path.join(diff_path, f'{stem}.png'))
+            
     # summary
     ssim_v = float(np.mean(ssims)) if ssims else 0.0
     psnr_v = float(np.mean(psnrs)) if psnrs else 0.0

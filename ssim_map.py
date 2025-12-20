@@ -229,12 +229,12 @@ def compare_folders(gt_dir, render1_dir, render2_dir, output_dir, method1_name="
 if __name__ == "__main__":
     
     # 예시 경로 설정
-    gt_folder_path      = "/home/iris/3DGS-DR/data/GlossyReal/maneki/images"
+    gt_folder_path      = "/home/iris/mount1/marigold/pcc_monkey/images"
     
-    render1_folder_path = "/home/iris/ref-gaussian/output/GlossyReal_material/maneki/test_renders/rgb"
-    render2_folder_path = "/home/iris/mount1/ref14/real_world_gs/output/learnable_box/maneki2/test/renders_parallax/rgb"
+    render1_folder_path = "/home/iris/mount1/ref14/real_world_gs/output/pcc_monkey_wopcc512/test/renders_infinite/rgb"
+    render2_folder_path = "/home/iris/mount1/ref14/real_world_gs/output/pcc_monkey3/test/renders_parallax/rgb"
     
-    output_save_path    = "./comparison_results_maneki3"
+    output_save_path    = "./ssim_monkey"
 
     # method_name은 파일명 뒤에 붙을 식별자입니다 (예: 219_baseline_error.png)
     compare_folders(

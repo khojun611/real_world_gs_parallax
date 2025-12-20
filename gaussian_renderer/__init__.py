@@ -405,7 +405,14 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     # extra_dict에서 값을 꺼내옵니다. 없으면 None.
     parallax_diff_map = extra_dict.get("parallax_diff", None)
     # [▲▲▲ 추가할 코드 끝 ▲▲▲]
-
+    # 2. 마스킹 적용 (배경 제거)
+    if parallax_diff_map is not None:
+        # refl_strength는 위에서 이미 정의됨 (rendered_features[:1])
+        # Threshold 0.1 ~ 0.3 사이 권장 (반사율이 낮은 곳은 검게 처리)
+        mask = (refl_strength > 0.5).float() 
+        
+        # 마스크를 곱해서 배경 노이즈 제거
+        parallax_diff_map = parallax_diff_map * mask
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
     results =  {"render": final_image,

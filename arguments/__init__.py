@@ -174,7 +174,7 @@ class OptimizationParams(ParamGroup):
         self.suppress_refl_thresh = 0.5     # 반사로 간주할 refl_strength 임계값
         self.suppress_unc_thresh = 0.3      # 반사로 간주할 uncertainty 임계값
         
-        self.lambda_sparsity = 0.01
+        self.lambda_sparsity = 0.0
         self.lambda_dist = 0.0
         self.lambda_normal_render_depth = 0.05
         self.lambda_normal_smooth = 0.0
